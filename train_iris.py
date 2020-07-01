@@ -40,8 +40,8 @@ criterion = torch.nn.CrossEntropyLoss()  # cross entropy loss
 def train(optimizer, model, epochs=2000, epoch_offset=0):
     for epoch in range(epochs):
 
-        # restrict weights in model
-        model.restrict()
+        # discretize weights in model
+        model.discretize()
 
         optimizer.zero_grad()
 

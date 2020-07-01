@@ -115,7 +115,7 @@ class ConcatLayer(torch.nn.Module):
 
         return torch.cat([x, inner_out], dim=-1)
 
-def restrict_weight(m):
+def discretize_weight(m):
     if hasattr(m, 'discretize_weight'):
         m.discretize_weight()
 
@@ -153,8 +153,8 @@ class Model(torch.nn.Module):
         self.network = torch.nn.Sequential(*layers)
         self.softmax = torch.nn.Softmax(dim=-1)
 
-    def restrict(self):
-        self.apply(restrict_weight)
+    def discretize(self):
+        self.apply(discretize_weight)
 
     def restore(self):
         self.apply(restore_weight)
