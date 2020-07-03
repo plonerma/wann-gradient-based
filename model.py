@@ -46,6 +46,8 @@ class MultiActivationModule(torch.nn.Module, Discretizable):
         super().__init__()
         self.funcs = [f[1] for f in self.available_act_functions]
 
+        self.out_features = n_out
+
         self.weight = torch.nn.Parameter(torch.zeros((self.n_funcs, n_out)))
         self.stored_weight = torch.empty_like(self.weight)
 
@@ -53,8 +55,13 @@ class MultiActivationModule(torch.nn.Module, Discretizable):
     def n_funcs(self):
         return len(self.funcs)
 
+    def init_weight(self):
+        torch.nn.init.uniform_(self.weight.data, 0, 1)
+        self.clip_weight()
+
     def clip_weight(self):
-        self.weight.data = self.weight.data / torch.norm(self.weight.data, dim=0).unsqueeze(dim=0)
+        length = torch.norm(self.weight.data, dim=0).unsqueeze(dim=0)
+        self.weight.data = self.weight.data / length
 
     @property
     def effective_weight(self):
@@ -77,25 +84,23 @@ class MultiActivationModule(torch.nn.Module, Discretizable):
         )
 
 
-class TertiaryLinear(torch.nn.Module, Discretizable):
+class TertiaryLinear(torch.nn.Linear, Discretizable):
     """Similar to torch.nn.Linear, with tertiary weights ($\in \{-1,0,1\}$)."""
 
-    def __init__(self, n_in, n_out):
-        super().__init__()
+    lambd = 0.4
 
-        self.linear = torch.nn.Linear(n_in, n_out, bias=False)
+    def __init__(self, n_in, n_out):
+        super().__init__(n_in, n_out, bias=False)
+
         self.stored_weight = torch.empty_like(self.weight)
 
     @property
-    def weight(self):
-        return self.linear.weight
-
-    @property
     def effective_weight(self):
-        return torch.sign(torch.nn.functional.hardshrink(self.weight, lambd=0.4))
+        return torch.sign(torch.nn.functional.hardshrink(self.weight, lambd=self.lambd))
 
-    def forward(self, x):
-        return self.linear(x)
+    def init_weight(self):
+        torch.nn.init.normal_(self.weight.data, std=.12)
+
 
 
 class ConcatLayer(torch.nn.Module):
@@ -129,10 +134,8 @@ def clip_weight(m):
 
 def weight_init(m):
     """Initialize weights randomly."""
-    if isinstance(m, TertiaryLinear):
-        torch.nn.init.normal_(m.weight.data, std=.12)
-    elif isinstance(m, MultiActivationModule):
-        torch.nn.init.uniform_(m.weight.data, 0, 1)
+    if isinstance(m, TertiaryLinear) or isinstance(m, MultiActivationModule):
+        m.init_weight()
 
 class Model(torch.nn.Module):
     def __init__(self, shared_weight, *layer_sizes):
