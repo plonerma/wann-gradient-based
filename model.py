@@ -10,15 +10,22 @@ import numpy as np
 
 
 class Discretizable:
-    def discretize_weight(self):
-        self.store_weight()
-        self.weight.data.copy_(self.effective_weight)
+    _is_discrete = False
 
-    def store_weight(self):
-        self.stored_weight.data.copy_(self.weight.data)
+    @property
+    def is_discrete(self):
+        return self._is_discrete
+
+    def discretize_weight(self):
+        if not self.is_discrete:
+            self.stored_weight.data.copy_(self.weight.data)
+            self.weight.data.copy_(self.effective_weight)
+            self._is_discrete = True
 
     def restore_weight(self):
-        self.weight.data.copy_(self.stored_weight.data)
+        if self.is_discrete:
+            self.weight.data.copy_(self.stored_weight.data)
+            self._is_discrete = False
 
     def clip_weight(self):
         torch.nn.functional.hardtanh(self.weight.data, inplace=True)
@@ -102,7 +109,6 @@ class TertiaryLinear(torch.nn.Linear, Discretizable):
         torch.nn.init.normal_(self.weight.data, std=.12)
 
 
-
 class ConcatLayer(torch.nn.Module):
     """Contatenates output of the active nodes and prior nodes."""
 
@@ -120,22 +126,27 @@ class ConcatLayer(torch.nn.Module):
 
         return torch.cat([x, inner_out], dim=-1)
 
+
 def discretize_weight(m):
     if hasattr(m, 'discretize_weight'):
         m.discretize_weight()
+
 
 def restore_weight(m):
     if hasattr(m, 'restore_weight'):
         m.restore_weight()
 
+
 def clip_weight(m):
     if hasattr(m, 'clip_weight'):
         m.clip_weight()
+
 
 def weight_init(m):
     """Initialize weights randomly."""
     if isinstance(m, TertiaryLinear) or isinstance(m, MultiActivationModule):
         m.init_weight()
+
 
 class Model(torch.nn.Module):
     def __init__(self, shared_weight, *layer_sizes):
@@ -169,16 +180,16 @@ class Model(torch.nn.Module):
         self.apply(weight_init)
 
     @property
-    def n_in(self):
+    def in_features(self):
         return self.layer_sizes[0]
 
     @property
-    def n_out(self):
+    def out_features(self):
         return self.layer_sizes[-1]
 
     def forward(self, x):
         net_out = self.network(x)
-        net_out = net_out[..., -self.n_out:]
+        net_out = net_out[..., -self.out_features:]
         return self.softmax(net_out)
 
 
