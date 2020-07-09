@@ -88,20 +88,20 @@ class ActModule(torch.nn.Module, Discretizable):
             torch.zeros_like(x)  # start value
         )
 
-    def add_node_out(self):
-        """Adds a new blank output node (initialize with near zero weight).
+    def append_nodes_out(self, n=1):
+        """Adds `n` new blank output node (initialize with near zero weight).
 
-        Will add the node at the end of nodes of this layer."""
+        Will add the nodes at the end of nodes of this layer."""
 
-        new_node = torch.Tensor(self.n_funcs, 1)
+        new_nodes = torch.Tensor(self.n_funcs, n)
 
-        self.init_weight(new_node)
+        self.init_weight(new_nodes)
 
-        new_weight = torch.cat([self.weight.data, new_node], dim=1)
+        new_weight = torch.cat([self.weight.data, new_nodes], dim=1)
 
         self.weight = torch.nn.Parameter(new_weight)
         self.stored_weight = torch.empty_like(self.weight)
-        self.out_features = self.out_features + 1
+        self.out_features = self.out_features + n
 
 
 class TertiaryLinear(torch.nn.Linear, Discretizable):
@@ -118,7 +118,7 @@ class TertiaryLinear(torch.nn.Linear, Discretizable):
     def effective_weight(self):
         return torch.sign(torch.nn.functional.hardshrink(self.weight, lambd=self.lambd))
 
-    def init_weight(self, t=None, near_zero=False):
+    def init_weight(self, t=None, near_zero=True):
         if t is None:
             t = self.weight
         if near_zero:
@@ -126,43 +126,46 @@ class TertiaryLinear(torch.nn.Linear, Discretizable):
         else:
             torch.nn.init.normal_(t.data, std=.1)
 
-    def add_node_out(self):
-        """Adds a new blank output node (initialize with near zero weight).
+    def append_nodes_out(self, n):
+        """Adds `n` blank output nodes (initialize with near zero weight).
 
-        Will add the node at the end of nodes of this layer.
+        Will add the nodes at the end of nodes of this layer.
         """
-        new_node = torch.Tensor(1, self.in_features)
+        new_nodes = torch.Tensor(n, self.in_features)
 
-        self.init_weight(new_node, near_zero=True)
+        self.init_weight(new_nodes, near_zero=True)
 
-        new_weight = torch.cat([self.weight.data, new_node], dim=0)
+        new_weight = torch.cat([self.weight.data, new_nodes], dim=0)
 
         self.weight = torch.nn.Parameter(new_weight)
         self.stored_weight = torch.empty_like(self.weight)
-        self.out_features = self.out_features + 1
+        self.out_features = self.out_features + n
 
-    def add_node_in(self, i):
-        """Adds a new blank input node (initialize with near zero weight).
+    def append_nodes_in(self, i, n):
+        """Adds n new inputse (initialize with near zero weight).
 
-        Row is added at index i.
+        Rows are added starting at index i.
         """
-        assert i <= self.in_features
+        assert i <= self.in_features, f"Node {i} can not be input for this layer (layer has {self.in_features} inputs)."
 
-        self.in_features = self.in_features + 1
+        self.in_features = self.in_features + n
         new_weight = torch.Tensor(self.out_features, self.in_features)
-        new_node = torch.Tensor(self.out_features, 1)
-        self.init_weight(new_node)
+        new_nodes = torch.Tensor(self.out_features, n)
+        self.init_weight(new_nodes, near_zero=True)
 
         before = torch.arange(0, i)
-        after = torch.arange(i+1, self.in_features)
+        new_indices = torch.arange(i, i+n)
+        after = torch.arange(i+n, self.in_features)
+
+        old_indices = torch.cat([before, after])
 
         # copy old weight
         new_weight.index_copy_(
-            dim=1, index=torch.cat([before, after]), source=self.weight.data)
+            dim=1, index=old_indices, source=self.weight.data)
 
         # copy new node
         new_weight.index_copy_(
-            dim=1, index=torch.LongTensor([i]), source=new_node)
+            dim=1, index=new_indices, source=new_nodes)
 
         self.weight = torch.nn.Parameter(new_weight)
         self.stored_weight = torch.empty_like(self.weight)
@@ -212,14 +215,14 @@ class ConcatLayer(torch.nn.Module):
 
         return torch.cat([x, inner_out], dim=-1)
 
-    def add_node_in(self, i):
-        print(f"adding node #{i} to inputs")
-        self.linear.add_node_in(i)
+    def append_nodes_in(self, i, n=1):
+        print(f"adding {n} nodes starting at #{i} to inputs")
+        self.linear.append_nodes_in(i, n)
 
-    def add_node_out(self):
-        self.linear.add_node_out()
-        self.activation.add_node_out()
-        i = self.in_features + self.out_features - 1
+    def append_nodes_out(self, n=1):
+        i = self.in_features + self.out_features
+        self.linear.append_nodes_out(n)
+        self.activation.append_nodes_out(n)
         return i
 
     def nodes_without_input(self):
@@ -250,10 +253,10 @@ class Model:
 
         self.hidden_layers = list()
 
-        for n_out in hidden_layer_sizes:
+        for n_o in hidden_layer_sizes:
             self.hidden_layers.append(
-                ConcatLayer(n_in, n_out, shared_weight))
-            n_in += n_out
+                ConcatLayer(n_in, n_o, shared_weight))
+            n_in += n_o
 
         self.output_layer = ConcatLayer(n_in, n_out, shared_weight)
 
@@ -294,19 +297,21 @@ class Model:
         grew = False
 
         for layer_i, layer in enumerate(self.hidden_layers):
-            for _ in range(max(self.blank_nodes - layer.nodes_without_input(), 0)):
-                print(f"Adding new node to layer #{layer_i}")
+            n = max(self.blank_nodes - layer.nodes_without_input(), 0)
+
+            if n > 0:
+                print(f"Adding {n} new nodes to layer #{layer_i}")
                 grew = True
 
                 # add new node to layer
-                node_i = layer.add_node_out()
+                node_i = layer.append_nodes_out(n)
 
                 # update later layers (expand weight matrices accordingly)
-
+                print('--hidden')
                 for later_hidden in self.hidden_layers[layer_i+1:]:
-                    later_hidden.add_node_in(node_i)
-
-                self.output_layer.add_node_in(node_i)
+                    later_hidden.append_nodes_in(node_i, n)
+                print('--last')
+                self.output_layer.append_nodes_in(node_i, n)
 
         last_hidden = self.hidden_layers[-1]
 
@@ -316,12 +321,14 @@ class Model:
             print("Adding new layer")
 
             # new blank layer needed
-            n_in = last_hidden.in_features + last_hidden.out_features
-            layer = GrowingConcatLayer(n_in, 1, self.shared_weight)
+            n_in = self.output_layer.in_features
+
+            layer = ConcatLayer(n_in, self.blank_nodes, self.shared_weight)
             layer.init_weight()
+
             self.hidden_layers.append(layer)
 
-            self.output_layer.add_node_in(n_in + layer.out_features - 1)
+            self.output_layer.append_nodes_in(n_in, n=self.blank_nodes)
 
         return grew
 
