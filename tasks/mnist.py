@@ -3,46 +3,58 @@ import numpy as np
 import cv2
 
 
+def load_mnist(test=False):
+    import mnist
+    if not test:
+        x = mnist.train_images()
+        y = mnist.train_labels()
+    else:
+        x = mnist.test_images()
+        y = mnist.test_labels()
+
+    x = x/255
+    return x, y
+
+
 def mnist_256(test=False):
     '''
     Converts 28x28 mnist digits to [16x16]
     [samples x pixels]  ([N X 256])
     '''
-    import mnist
-    if not test:
-        x = mnist.train_images()
-        y_true = mnist.train_labels()
-    else:
-        x = mnist.test_images()
-        y_true = mnist.test_labels()
+    x, y = load_mnist(test)
 
-    x = x/255
-    x = preprocess(x,(16,16))
+    x = preprocess(x, (16, 16))
     x = x.reshape(-1, (256))
 
-    return x, y_true
+    return x, y
 
-def preprocess(img,size, patchCorner=(0,0), patchDim=None, unskew=True):
-    """
-    Resizes, crops, and unskewes images
-    """
-    if patchDim is None:
-        patchDim = size
-    nImg = np.shape(img)[0]
-    procImg  = np.empty((nImg,size[0],size[1]))
+
+def mnist_full(test=False):
+    """28x28 mnist digits"""
+    x, y = load_mnist(test)
+
+    x = preprocess(x)
+    x = x.reshape(-1, (28*28))
+
+    return x, y
+
+
+def preprocess(images, size=None):
+    """Resizes, and unskewes images. """
+
+    nImg = np.shape(images)[0]
+
+    if size is None:
+        procImg = np.empty_like(images, dtype='float')
+    else:
+        procImg = np.empty((nImg, size[0], size[1]))
 
     # Unskew and Resize
-    if unskew:
-        for i in range(nImg):
-            procImg[i,:,:] = deskew(cv2.resize(img[i,:,:],size),size)
-
-    # Crop
-    cropImg  = np.empty((nImg,patchDim[0],patchDim[1]))
-
     for i in range(nImg):
-        cropImg[i,:,:] = procImg[i,patchCorner[0]:patchCorner[0]+patchDim[0],\
-                                 patchCorner[1]:patchCorner[1]+patchDim[1]]
-    procImg = cropImg
+        img = images[i, :, :]
+        if size is not None:
+            img = cv2.resize(img, size)
+        procImg[i, :, :] = deskew(img, img.shape)
 
     return procImg
 
