@@ -12,11 +12,22 @@ from tasks.mnist import mnist_256
 import numpy as np
 
 
-training_epochs = 100
+
+
+# PARAMETERS
+
+training_epochs = 400
+use_weight_alpha_blending = True
+use_loss_alpha_blending = False
+
+
+
+
+
 
 
 x, y = mnist_256()
-train_data = DataLoader(TensorDataset(torch.Tensor(x), torch.Tensor(y)), batch_size=1000)
+train_data = DataLoader(TensorDataset(torch.Tensor(x), torch.Tensor(y)), batch_size=1000, shuffle=True)
 
 test_x, test_y = mnist_256(test=True)
 
@@ -29,7 +40,7 @@ test_y = Variable(torch.Tensor(test_y).long())
 
 
 
-writer = SummaryWriter(comment='_mnist')
+writer = SummaryWriter(comment='_mnist_static')
 
 criterion = torch.nn.CrossEntropyLoss()  # cross entropy loss
 
@@ -41,20 +52,33 @@ def train(optimizer, model, epochs=100):
         for i, data in enumerate(train_data):
             x, y = data
 
+            n_weights = model.shared_weight.size()[0]
+
             # add bias to the inputs
             x = np.hstack([x, np.ones((x.shape[0], 1))])
 
-            x = Variable(torch.Tensor(x).float())
-            y = Variable(torch.Tensor(y).long())
+            x = Variable(torch.Tensor(x).float().unsqueeze(dim=0).expand((n_weights, -1, -1)))
+            y = Variable(torch.Tensor(y).long().repeat(n_weights))
 
             # discretize weights in model
-            model.discretize()
+            alpha = (epoch * len(train_data) + i) / (epochs * len(train_data))
+
+            if use_loss_alpha_blending:
+                out = model(x).view(-1, model.out_features)
+                loss_continous = criterion(out, y)
+
+
+            model.discretize(alpha=(alpha if use_weight_alpha_blending else 1))
+
+            out = model(x).view(-1, model.out_features)
+            loss_discrete = criterion(out, y)
+
+            if use_loss_alpha_blending:
+                loss = loss_discrete * alpha + loss_continous * (1-alpha)
+            else:
+                loss = loss_discrete
 
             optimizer.zero_grad()
-
-            batch = x.unsqueeze(dim=0).expand((model.shared_weight.size()[0], -1, -1))
-            out = model(batch).view(-1, model.n_out)
-            loss = criterion(out, y.repeat(model.shared_weight.size()))
 
             loss.backward()
 
@@ -67,7 +91,19 @@ def train(optimizer, model, epochs=100):
             # clip weights
             model.clip()
 
-            writer.add_scalar("Loss", loss.data, epoch * len(train_data) + i)
+            scalars = [
+                ("Loss", loss.data),
+                ("Training/Alpha", alpha),
+            ]
+
+            if use_loss_alpha_blending:
+                scalars += [
+                    ("Loss/Discrete", loss_discrete.data),
+                    ("Loss/Continous", loss_continous.data),
+                ]
+
+            for label, s, in scalars:
+                writer.add_scalar(label, s, epoch * len(train_data) + i)
 
         write_hist(writer, model, epoch)
         acc = evaluate(model, epoch=epoch)
@@ -81,10 +117,10 @@ def evaluate(model, epoch=0):
 
     # add another dimenstion for weights and expand input for the number
     # of sampled shared weights
-    
+
     batch = test_X.unsqueeze(dim=0).expand((model.shared_weight.size()[0], -1, -1))
 
-    predict_out = model(batch).view(-1, model.n_out)
+    predict_out = model(batch).view(-1, model.out_features)
 
     # restore original weights
     model.restore()
@@ -93,7 +129,7 @@ def evaluate(model, epoch=0):
 
     acc = accuracy_score(test_y.repeat(model.shared_weight.size()).data, predict_y.data)
 
-    writer.add_scalar('prediction accurary', acc, epoch)
+    writer.add_scalar('Evaluation/Accurary on Test Data; discretized', acc, epoch)
     return acc
 
 
@@ -103,12 +139,12 @@ shared_weight = Variable(torch.Tensor([.8,.9,1.0,1.1,1.2]))
 
 layer_sizes = (
     [257]  # inputs (including bias)
-    + [10] * 8  # hidden layers
+    + [10] * 3  # hidden layers
     + [10]) # outputs
 
 model = Model(shared_weight, *layer_sizes)
 
-optimizer = torch.optim.SGD(model.parameters(), lr=0.1, momentum=0.9, nesterov=True, weight_decay=5e-4)
+optimizer = torch.optim.SGD(model.parameters(), lr=0.2)
 
 model.init_weights()
 

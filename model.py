@@ -16,10 +16,13 @@ class Discretizable:
     def is_discrete(self):
         return self._is_discrete
 
-    def discretize_weight(self):
+    def discretize_weight(self, alpha=1):
         if not self.is_discrete:
             self.stored_weight.data.copy_(self.weight.data)
-            self.weight.data.copy_(self.effective_weight)
+
+            self.weight.data.copy_(
+                (1-alpha) * self.weight
+                + alpha * self.effective_weight)
             self._is_discrete = True
 
     def restore_weight(self):
@@ -127,9 +130,9 @@ class ConcatLayer(torch.nn.Module):
         return torch.cat([x, inner_out], dim=-1)
 
 
-def discretize_weight(m):
+def discretize_weight(m, alpha=1):
     if hasattr(m, 'discretize_weight'):
-        m.discretize_weight()
+        m.discretize_weight(alpha=alpha)
 
 
 def restore_weight(m):
@@ -167,8 +170,8 @@ class Model(torch.nn.Module):
         self.network = torch.nn.Sequential(*layers)
         self.softmax = torch.nn.Softmax(dim=-1)
 
-    def discretize(self):
-        self.apply(discretize_weight)
+    def discretize(self, alpha=1):
+        self.apply(partial(discretize_weight, alpha=alpha))
 
     def restore(self):
         self.apply(restore_weight)
