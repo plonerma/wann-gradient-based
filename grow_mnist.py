@@ -16,7 +16,7 @@ training_epochs = 200
 
 
 x, y = mnist_256()
-train_data = DataLoader(TensorDataset(torch.Tensor(x), torch.Tensor(y)), batch_size=1000)
+train_data = DataLoader(TensorDataset(torch.Tensor(x), torch.Tensor(y)), batch_size=1000, shuffle=True)
 
 test_x, test_y = mnist_256(test=True)
 
@@ -28,7 +28,7 @@ test_X = Variable(torch.Tensor(test_x).float())
 test_y = Variable(torch.Tensor(test_y).long())
 
 
-writer = SummaryWriter(comment='_mnist')
+writer = SummaryWriter(comment='_mnist_growing')
 
 criterion = torch.nn.CrossEntropyLoss()  # cross entropy loss
 
@@ -82,7 +82,6 @@ def train(optimizer, model, epochs=100):
                     # This is ugly, but it seems to be the simplest way
                     optimizer.param_groups = list()
                     params = list(model.parameters())
-                    print(len(params))
                     optimizer.add_param_group({'params': params})
 
             layer_sizes = model.layer_sizes()
