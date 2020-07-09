@@ -142,7 +142,7 @@ layer_sizes = (
     + [10] * 3  # hidden layers
     + [10]) # outputs
 
-model = Model(shared_weight, *layer_sizes)
+model = Model(shared_weight, 257, 10, [10]*3)
 
 optimizer = torch.optim.SGD(model.parameters(), lr=0.2)
 
