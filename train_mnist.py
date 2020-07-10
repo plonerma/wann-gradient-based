@@ -7,7 +7,7 @@ from sklearn.metrics import accuracy_score
 
 from model import Model, write_hist
 
-from tasks.mnist import mnist_256 as mnist
+from tasks.mnist import mnist_full as mnist
 
 import numpy as np
 
@@ -20,13 +20,15 @@ training_epochs = 400
 use_weight_alpha_blending = True
 use_loss_alpha_blending = False
 
-in_features = 256
+in_features = 28*28
 out_features = 10
 
 #layer_sizes = [10]*3
 layer_sizes = None
 
 grow = (layer_sizes is None)
+
+model_file_name = 'tmp_model.pt'
 
 
 # prepare data
@@ -43,23 +45,11 @@ test_X = Variable(torch.Tensor(test_x).float())
 test_y = Variable(torch.Tensor(test_y).long())
 
 
-# initialize writer for logging data to tensorboard
-writer = SummaryWriter(comment='_mnist_static')
-
-
-# set shared weights
-shared_weight = Variable(torch.Tensor([.8,.9,1.0,1.1,1.2]))
-
-
-
 criterion = torch.nn.CrossEntropyLoss()  # cross entropy loss
 
 def train(optimizer, model, epochs=100):
     print (f"Training for {epochs} epochs with {len(train_data)} batches")
     for epoch in range(epochs):
-
-        print(f"#{epoch}")
-
         for i, data in enumerate(train_data):
             x, y = data
 
@@ -143,7 +133,7 @@ def train(optimizer, model, epochs=100):
             print(f"Completed epoch #{epoch} with acc: {acc}")
 
 
-def evaluate(model, epoch=0):
+def evaluate(model, epoch=None):
     with model.discrete():  # discretize weights in model
 
         # add another dimenstion for weights and expand input for the number
@@ -157,24 +147,33 @@ def evaluate(model, epoch=0):
 
         acc = accuracy_score(test_y.repeat(model.shared_weight.size()).data, predict_y.data)
 
-        writer.add_scalar('Evaluation/Accurary on Test Data; discretized', acc, epoch)
+        if epoch is not None:
+            writer.add_scalar('Evaluation/Accurary on Test Data; discretized', acc, epoch)
+
         return acc
 
 
+if __name__ == "__main__":
 
+    # initialize writer for logging data to tensorboard
+    writer = SummaryWriter(comment='_mnist_full')
 
-model = Model(shared_weight,
-              in_features + 1, out_features,
-              layer_sizes, grow=grow)
+    # set shared weights
+    shared_weight = Variable(torch.linspace(.5, 1.5, 5))
 
-optimizer = torch.optim.SGD(model.parameters(), lr=0.2)
+    model = Model(shared_weight, in_features + 1, out_features, layer_sizes)
+    model.init_weight()
 
-model.init_weights()
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.2)
 
-print(f"training: {training_epochs} epochs")
+    print(f"training: {training_epochs} epochs")
 
-train(optimizer, model, training_epochs)
-evaluate(model, epoch=training_epochs)
-write_hist(writer, model, epoch=training_epochs)
+    train(optimizer, model, training_epochs)
+    evaluate(model, epoch=training_epochs)
+    write_hist(writer, model, epoch=training_epochs)
 
-print("Done.")
+    if model_file_name is not None:
+        print("Saving model.")
+        torch.save(model.to_dict(), model_file_name)
+
+    print("Done.")

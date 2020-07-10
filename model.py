@@ -35,7 +35,7 @@ class ActModule(torch.nn.Module, Discretizable):
         ('relu', torch.relu),
         ('sigmoid', torch.sigmoid),
         ('tanh', torch.tanh),
-        ('gaussian (standard)', lambda x: torch.exp(-torch.square(x) / 2.0)),
+        #('gaussian (standard)', lambda x: torch.exp(-torch.square(x) / 2.0)),
         ('step', lambda t: (t > 0.0) * 1.0),
         #('identity', lambda x: x),
         #('inverse', torch.neg),
@@ -102,6 +102,17 @@ class ActModule(torch.nn.Module, Discretizable):
         self.weight = torch.nn.Parameter(new_weight)
         self.stored_weight = torch.empty_like(self.weight)
         self.out_features = self.out_features + n
+
+    def delete_nodes_out(self, i):
+        if not isinstance(i, torch.Tensor):
+            i = torch.LongTensor([i])
+        keep = torch.ones(self.out_features, dtype=bool)
+        keep[i] = False
+        self.out_features -= i.shape[0]
+        new_weight = self.weight.data[:, keep]
+
+        self.weight = torch.nn.Parameter(new_weight)
+        self.stored_weight = torch.empty_like(self.weight)
 
 
 class TertiaryLinear(torch.nn.Linear, Discretizable):
@@ -170,6 +181,24 @@ class TertiaryLinear(torch.nn.Linear, Discretizable):
         self.weight = torch.nn.Parameter(new_weight)
         self.stored_weight = torch.empty_like(self.weight)
 
+    def delete_nodes_out(self, i):
+        if not isinstance(i, torch.Tensor):
+            i = torch.LongTensor([i])
+        keep = torch.ones(self.out_features, dtype=bool)
+        keep[i] = False
+        self.out_features -= i.shape[0]
+        self.weight = torch.nn.Parameter(self.weight.data[keep, :])
+        self.stored_weight = torch.empty_like(self.weight)
+
+    def delete_nodes_in(self, i):
+        if not isinstance(i, torch.Tensor):
+            i = torch.LongTensor([i])
+        keep = torch.ones(self.in_features, dtype=bool)
+        keep[i] = False
+        self.in_features -= i.shape[0]
+        self.weight = torch.nn.Parameter(self.weight.data[:, keep])
+        self.stored_weight = torch.empty_like(self.weight)
+
 
 class ConcatLayer(torch.nn.Module):
     """Contatenates output of the active nodes and prior nodes."""
@@ -216,7 +245,6 @@ class ConcatLayer(torch.nn.Module):
         return torch.cat([x, inner_out], dim=-1)
 
     def append_nodes_in(self, i, n=1):
-        print(f"adding {n} nodes starting at #{i} to inputs")
         self.linear.append_nodes_in(i, n)
 
     def append_nodes_out(self, n=1):
@@ -225,35 +253,36 @@ class ConcatLayer(torch.nn.Module):
         self.activation.append_nodes_out(n)
         return i
 
+    def delete_nodes_in(self, i):
+        self.linear.delete_nodes_in(i)
+
+    def delete_nodes_out(self, i):
+        self.linear.delete_nodes_out(i)
+        self.activation.delete_nodes_out(i)
+
     def nodes_without_input(self):
-        inactive_conns = self.linear.weight.data.abs() < self.gamma
         # inputs are spread across dimension 1
-        return inactive_conns.all(1).sum()
-
-    def parameters(self):
-        yield self.linear.weight
-        yield self.activation.weight
+        out_indices = torch.arange(self.out_features)
+        return out_indices[(self.linear.weight.data.abs() < self.gamma).all(1)]
 
 
-class Model:
+class Model(torch.nn.Module):
     blank_nodes = 6
 
-    def __init__(self, shared_weight, n_in, n_out,
-                 hidden_layer_sizes=None, grow=False):
+    def __init__(self, shared_weight, n_in, n_out, hidden_layer_sizes=None):
         super().__init__()
-
-        assert (hidden_layer_sizes is not None) != grow, "Model can EITHER grow OR have static hidden layer sizes."
 
         self.in_features = n_in
         self.out_features = n_out
         self.shared_weight = shared_weight
 
-        if grow:
+        if hidden_layer_sizes is None:
             hidden_layer_sizes = [self.blank_nodes]
 
-        self.hidden_layers = list()
+        self.hidden_layers = torch.nn.ModuleList()
 
         for n_o in hidden_layer_sizes:
+            n_o = int(n_o)
             self.hidden_layers.append(
                 ConcatLayer(n_in, n_o, shared_weight))
             n_in += n_o
@@ -263,62 +292,48 @@ class Model:
         self.softmax = torch.nn.Softmax(dim=-1)
 
     def forward(self, x):
-        for layer in self.hidden_layers:
+        for layer in self.layers():
             x = layer(x)
 
-        net_out = self.output_layer(x)
-
-        net_out = net_out[..., -self.out_features:]
+        net_out = x[..., -self.out_features:]
 
         return self.softmax(net_out)
-
-    def __call__(self, *args):
-        return self.forward(*args)
-
-    def parameters(self):
-        for layer in self.layers():
-            yield from layer.parameters()
 
     def numel(self):
         return sum([p.numel() for p in self.parameters()])
 
     def nodes_without_input(self, hidden_only=False):
-        layers = self.hidden_layers if hidden_only else self.layers()
-        return sum([layer.nodes_without_input() for layer in layers])
+        return sum([layer.nodes_without_input().shape[0] for layer in self.layers(hidden_only)])
 
-    def layer_sizes(self):
-        return torch.Tensor([layer.out_features for layer in self.layers()])
+    def layer_sizes(self, hidden_only=False):
+        return torch.Tensor([layer.out_features for layer in self.layers(hidden_only)])
 
-    def layers(self):
+    def layers(self, hidden_only=False):
         yield from self.hidden_layers
-        yield self.output_layer
+        if not hidden_only:
+            yield self.output_layer
 
     def grow(self):
         grew = False
 
         for layer_i, layer in enumerate(self.hidden_layers):
-            n = max(self.blank_nodes - layer.nodes_without_input(), 0)
+            n = max(self.blank_nodes - layer.nodes_without_input().shape[0], 0)
 
             if n > 0:
-                print(f"Adding {n} new nodes to layer #{layer_i}")
                 grew = True
 
                 # add new node to layer
                 node_i = layer.append_nodes_out(n)
 
                 # update later layers (expand weight matrices accordingly)
-                print('--hidden')
                 for later_hidden in self.hidden_layers[layer_i+1:]:
                     later_hidden.append_nodes_in(node_i, n)
-                print('--last')
                 self.output_layer.append_nodes_in(node_i, n)
 
         last_hidden = self.hidden_layers[-1]
 
         if last_hidden.out_features > self.blank_nodes:
             grew = True
-
-            print("Adding new layer")
 
             # new blank layer needed
             n_in = self.output_layer.in_features
@@ -331,6 +346,35 @@ class Model:
             self.output_layer.append_nodes_in(n_in, n=self.blank_nodes)
 
         return grew
+
+    def cleanup(self):
+        for i, layer in enumerate(self.hidden_layers):
+            nodes_to_delete = layer.nodes_without_input()
+            if nodes_to_delete.shape[0] > 0:
+                layer.delete_nodes_out(nodes_to_delete)
+
+                # add offset for global indices
+                nodes_to_delete += layer.in_features
+                for later_hidden in self.hidden_layers[i+1:]:
+                    later_hidden.delete_nodes_in(nodes_to_delete)
+                self.output_layer.delete_nodes_in(nodes_to_delete)
+
+        # go though layers in reverse order to preserve correctness of indices
+        for i in reversed(range(len(self.hidden_layers))):
+            if self.hidden_layers[i].out_features == 0:
+                del self.hidden_layers[i]
+
+    def to_dict(self):
+        return {
+            'state': self.state_dict(),
+            'hidden_layer_sizes': self.layer_sizes(hidden_only=True),
+        }
+
+    @classmethod
+    def from_dict(cls, shared_weight, n_in, n_out, d):
+        m = cls(shared_weight, n_in, n_out, hidden_layer_sizes=d['hidden_layer_sizes'])
+        m.load_state_dict(d['state'])
+        return m
 
     @contextmanager
     def discrete(self, alpha=1):
@@ -352,15 +396,10 @@ class Model:
         for layer in self.layers():
             layer.clip_weight()
 
-    def init_weights(self):
+    def init_weight(self):
         for layer in self.layers():
             layer.init_weight()
 
-    def modules(self):
-        for m in self.layers():
-            yield from m.modules()
-            yield m
-        yield self.softmax
 
 def write_hist(writer, model, epoch):
     effective_weights = list()
@@ -373,14 +412,6 @@ def write_hist(writer, model, epoch):
 
     effective_weights = torch.cat(effective_weights)
     actual_weights = torch.cat(actual_weights)
-
-    if torch.any(torch.isnan(effective_weights)):
-        print("NAN!!!")
-        print(effective_weights)
-
-    if torch.any(torch.isnan(actual_weights)):
-        print("NAN!!!")
-        print(effective_weights)
 
     writer.add_histogram("effective weights", effective_weights, epoch)
     writer.add_histogram("actual weights", actual_weights, epoch)
