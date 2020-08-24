@@ -4,25 +4,24 @@ from functools import reduce
 
 
 class Discretizable:
-    _is_discrete = False
+    is_discrete = False
 
-    @property
-    def is_discrete(self):
-        return self._is_discrete
-
-    def discretize_weight(self, alpha=1):
+    def alpha_blend(self, alpha=1):
         if not self.is_discrete:
             self.stored_weight.data.copy_(self.weight.data)
 
             self.weight.data.copy_(
                 (1-alpha) * self.weight
-                + alpha * self.effective_weight)
-            self._is_discrete = True
+                + alpha * self.quantized_weight)
+            self.is_discrete = True
+
+        # TODO: In Activation Module: Test whether dividing the weight by the
+        # sum makes a differences for how the gradient is calculated!
 
     def restore_weight(self):
         if self.is_discrete:
             self.weight.data.copy_(self.stored_weight.data)
-            self._is_discrete = False
+            self.is_discrete = False
 
     def clip_weight(self):
         torch.nn.functional.hardtanh(self.weight.data, inplace=True)
@@ -69,7 +68,7 @@ class ActModule(torch.nn.Module, Discretizable):
         self.weight.data = self.weight.data / length
 
     @property
-    def effective_weight(self):
+    def quantized_weight(self):
         indices = torch.max(self.weight, 0).indices
         return torch.nn.functional.one_hot(indices, self.n_funcs).T.float()
 
@@ -118,15 +117,14 @@ class ActModule(torch.nn.Module, Discretizable):
 class TertiaryLinear(torch.nn.Linear, Discretizable):
     """Similar to torch.nn.Linear, with tertiary weights ($\in \{-1,0,1\}$)."""
 
-    lambd = 0.4
-
-    def __init__(self, n_in, n_out):
+    def __init__(self, n_in, n_out, lambd=0.4):
         super().__init__(n_in, n_out, bias=False)
 
         self.stored_weight = torch.empty_like(self.weight)
+        self.lambd = lambd
 
     @property
-    def effective_weight(self):
+    def quantized_weight(self):
         return torch.sign(torch.nn.functional.hardshrink(self.weight, lambd=self.lambd))
 
     def init_weight(self, t=None, near_zero=True):
@@ -135,7 +133,7 @@ class TertiaryLinear(torch.nn.Linear, Discretizable):
         if near_zero:
             torch.nn.init.uniform_(t.data, -.1, .1)
         else:
-            torch.nn.init.normal_(t.data, std=.1)
+            torch.nn.init.xavier_normal_(t.data)
 
     def append_nodes_out(self, n):
         """Adds `n` blank output nodes (initialize with near zero weight).
@@ -203,8 +201,6 @@ class TertiaryLinear(torch.nn.Linear, Discretizable):
 class ConcatLayer(torch.nn.Module):
     """Contatenates output of the active nodes and prior nodes."""
 
-    gamma = 0.3
-
     def __init__(self, n_in, n_out, shared_weight):
         super().__init__()
 
@@ -213,13 +209,13 @@ class ConcatLayer(torch.nn.Module):
 
         self.shared_weight = shared_weight
 
-    def init_weight(self):
-        self.linear.init_weight()
+    def init_weight(self, near_zero=True):
+        self.linear.init_weight(near_zero=near_zero)
         self.activation.init_weight()
 
-    def discretize_weight(self, alpha=1):
-        self.linear.discretize_weight(alpha=alpha)
-        self.activation.discretize_weight(alpha=alpha)
+    def alpha_blend(self, alpha=1):
+        self.linear.alpha_blend(alpha=alpha)
+        self.activation.alpha_blend(alpha=alpha)
 
     def restore_weight(self):
         self.linear.restore_weight()
@@ -260,24 +256,28 @@ class ConcatLayer(torch.nn.Module):
         self.linear.delete_nodes_out(i)
         self.activation.delete_nodes_out(i)
 
-    def nodes_without_input(self):
+    def nodes_without_input(self, gamma=0.4):
         # inputs are spread across dimension 1
         out_indices = torch.arange(self.out_features)
-        return out_indices[(self.linear.weight.data.abs() < self.gamma).all(1)]
+        return out_indices[(self.linear.weight.data.abs() < gamma).all(1)]
 
 
 class Model(torch.nn.Module):
     blank_nodes = 6
 
-    def __init__(self, shared_weight, n_in, n_out, hidden_layer_sizes=None):
+    def __init__(self, shared_weight, n_in, n_out, hidden_layer_sizes=None, gamma=0.4):
         super().__init__()
 
         self.in_features = n_in
         self.out_features = n_out
         self.shared_weight = shared_weight
+        self.gamma = gamma
 
         if hidden_layer_sizes is None:
             hidden_layer_sizes = [self.blank_nodes]
+            self.growing = True
+        else:
+            self.growing = False
 
         self.hidden_layers = torch.nn.ModuleList()
 
@@ -303,9 +303,9 @@ class Model(torch.nn.Module):
         return sum([p.numel() for p in self.parameters()])
 
     def nodes_without_input(self, hidden_only=False):
-        return sum([layer.nodes_without_input().shape[0] for layer in self.layers(hidden_only)])
+        return sum([layer.nodes_without_input(self.gamma).shape[0] for layer in self.layers(hidden_only)])
 
-    def layer_sizes(self, hidden_only=False):
+    def layer_sizes(self, hidden_only=True):
         return torch.Tensor([layer.out_features for layer in self.layers(hidden_only)])
 
     def layers(self, hidden_only=False):
@@ -317,7 +317,7 @@ class Model(torch.nn.Module):
         grew = False
 
         for layer_i, layer in enumerate(self.hidden_layers):
-            n = max(self.blank_nodes - layer.nodes_without_input().shape[0], 0)
+            n = max(self.blank_nodes - layer.nodes_without_input(self.gamma).shape[0], 0)
 
             if n > 0:
                 grew = True
@@ -349,7 +349,7 @@ class Model(torch.nn.Module):
 
     def cleanup(self):
         for i, layer in enumerate(self.hidden_layers):
-            nodes_to_delete = layer.nodes_without_input()
+            nodes_to_delete = layer.nodes_without_input(self.gamma)
             if nodes_to_delete.shape[0] > 0:
                 layer.delete_nodes_out(nodes_to_delete)
 
@@ -377,41 +377,41 @@ class Model(torch.nn.Module):
         return m
 
     @contextmanager
-    def discrete(self, alpha=1):
+    def discrete(self):
+        with self.alpha_blend(alpha=1):
+            yield
+
+    @contextmanager
+    def alpha_blend(self, alpha=1):
         try:
-            self.discretize(alpha=alpha)
+            for layer in self.layers():
+                layer.alpha_blend(alpha=alpha)
             yield
         finally:
-            self.restore()
-
-    def discretize(self, alpha=1):
-        for layer in self.layers():
-            layer.discretize_weight(alpha=alpha)
-
-    def restore(self):
-        for layer in self.layers():
-            layer.restore_weight()
+            for layer in self.layers():
+                layer.restore_weight()
 
     def clip(self):
         for layer in self.layers():
             layer.clip_weight()
 
     def init_weight(self):
-        for layer in self.layers():
+        for layer in self.hidden_layers:
             layer.init_weight()
+        self.output_layer.init_weight(near_zero=self.growing)
 
 
 def write_hist(writer, model, epoch):
-    effective_weights = list()
+    quantized_weights = list()
     actual_weights = list()
 
     for layer in model.hidden_layers:
         m = layer.linear
-        effective_weights.append(m.effective_weight.reshape(-1))
+        quantized_weights.append(m.quantized_weight.reshape(-1))
         actual_weights.append(m.weight.reshape(-1))
 
-    effective_weights = torch.cat(effective_weights)
+    quantized_weights = torch.cat(quantized_weights)
     actual_weights = torch.cat(actual_weights)
 
-    writer.add_histogram("effective weights", effective_weights, epoch)
+    writer.add_histogram("quantized weights", quantized_weights, epoch)
     writer.add_histogram("actual weights", actual_weights, epoch)

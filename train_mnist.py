@@ -7,7 +7,7 @@ from sklearn.metrics import accuracy_score
 
 from model import Model, write_hist
 
-from tasks.mnist import mnist_full as mnist
+from tasks.mnist import mnist_256 as mnist
 
 import numpy as np
 
@@ -17,19 +17,24 @@ import numpy as np
 # parameters
 
 training_epochs = 400
-use_weight_alpha_blending = True
-use_loss_alpha_blending = False
 
-in_features = 28*28
+in_features = 16*16
 out_features = 10
 
 #layer_sizes = [10]*3
 layer_sizes = None
 
+num_weights = 10
+
 grow = (layer_sizes is None)
 
 model_file_name = 'tmp_model.pt'
 
+
+use_alpha_blending = True
+use_ste = False
+
+distribution = 'lognormal', 0, 0.5
 
 # prepare data
 
@@ -47,9 +52,28 @@ test_y = Variable(torch.Tensor(test_y).long())
 
 criterion = torch.nn.CrossEntropyLoss()  # cross entropy loss
 
+
+def sample_weight(w):
+    np.random.lognormal()
+    np.random.lognormal()
+    dist, a, b = distribution
+
+    r_func = dict(
+        uniform=np.random.uniform,
+        normal=np.random.normal,
+        lognormal=np.random.lognormal,
+    )
+
+    w.data = torch.from_numpy(
+        r_func[dist](a, b, tuple(w.size())).astype('float32')
+    )
+
+
 def train(optimizer, model, epochs=100):
-    print (f"Training for {epochs} epochs with {len(train_data)} batches")
+    print(f"Training for {epochs} epochs with {len(train_data)} batches")
     for epoch in range(epochs):
+        sample_weight(model.shared_weight)
+
         for i, data in enumerate(train_data):
             x, y = data
 
@@ -64,24 +88,20 @@ def train(optimizer, model, epochs=100):
 
             optimizer.zero_grad()
 
-            alpha = (epoch * len(train_data) + i) / (epochs * len(train_data))
+            if use_alpha_blending:
+                alpha = (epoch * len(train_data) + i) / (epochs * len(train_data))
+            else:
+                alpha = 1
 
-            if use_loss_alpha_blending:
+            with model.alpha_blend(alpha):
                 out = model(x).view(-1, model.out_features)
-                loss_continous = criterion(out, y)
-
-            weight_alpha = (alpha if use_weight_alpha_blending else 1)
-            with model.discrete(alpha=weight_alpha):
-                out = model(x).view(-1, model.out_features)
-                loss_discrete = criterion(out, y)
-
-                loss = loss_discrete
-
-                if use_loss_alpha_blending:
-                    loss *= alpha
-                    loss += (1-alpha) + loss_continous
-
+                loss = criterion(out, y)
                 loss.backward()
+
+            if not use_ste:
+                for group in optimizer.param_groups:
+                    for p in group['params']:
+                        p.grad = p.grad * (1-alpha)
 
             # update original weights
             optimizer.step()
@@ -106,12 +126,6 @@ def train(optimizer, model, epochs=100):
                 ("Training/Alpha", alpha),
             ]
 
-            if use_loss_alpha_blending:
-                scalars += [
-                    ("Loss/Discrete", loss_discrete.data),
-                    ("Loss/Continous", loss_continous.data),
-                ]
-
             ls = model.layer_sizes()
 
             if grow:
@@ -121,7 +135,8 @@ def train(optimizer, model, epochs=100):
                     ("Architecture/Biggest Layer", ls.max()),
                     ("Architecture/Mean Layer", ls.mean()),
                     ("Architecture/Num Nodes", ls.sum()),
-                    ("Architecture/Nodes without input", model.nodes_without_input())
+                    ("Architecture/Nodes without input", model.nodes_without_input()),
+                    ("Architecture/Output nodes without input", model.output_layer.nodes_without_input().shape[0]),
                 ]
 
             for label, s, in scalars:
@@ -134,6 +149,9 @@ def train(optimizer, model, epochs=100):
 
 
 def evaluate(model, epoch=None):
+    sample_weight(model.shared_weight)
+
+
     with model.discrete():  # discretize weights in model
 
         # add another dimenstion for weights and expand input for the number
@@ -156,10 +174,10 @@ def evaluate(model, epoch=None):
 if __name__ == "__main__":
 
     # initialize writer for logging data to tensorboard
-    writer = SummaryWriter(comment='_mnist_full')
+    writer = SummaryWriter(comment='_mnist')
 
     # set shared weights
-    shared_weight = Variable(torch.linspace(.5, 1.5, 5))
+    shared_weight = Variable(torch.empty(num_weights))
 
     model = Model(shared_weight, in_features + 1, out_features, layer_sizes)
     model.init_weight()
@@ -169,8 +187,20 @@ if __name__ == "__main__":
     print(f"training: {training_epochs} epochs")
 
     train(optimizer, model, training_epochs)
-    evaluate(model, epoch=training_epochs)
+    acc = evaluate(model, epoch=training_epochs)
     write_hist(writer, model, epoch=training_epochs)
+
+    writer.add_hparams(dict(
+        epochs=training_epochs,
+        mnist_size=in_features,
+        alpha_blending=use_alpha_blending,
+        ste=use_ste,
+        growing=grow,
+        num_weights=num_weights,
+        distribution='{} ({}, {})'.format(*distribution),
+    ), dict(
+        accuracy=acc,
+    ))
 
     if model_file_name is not None:
         print("Saving model.")
