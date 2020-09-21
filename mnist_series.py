@@ -25,6 +25,8 @@ import pandas as pd
 
 import logging
 
+import toml
+
 
 def get_vacant_file_name(fn):
     i = None
@@ -48,8 +50,7 @@ def train(optimizer, model, data, epochs=100,
         for i, (x, y) in enumerate(data):
 
             x = x.unsqueeze(dim=0).expand((n_weights, -1, -1))
-            x = Variable(x)
-            y = Variable(torch.Tensor(y).long().repeat(n_weights))
+            y = y.repeat(n_weights)
 
             optimizer.zero_grad()
 
@@ -88,7 +89,7 @@ def train(optimizer, model, data, epochs=100,
                         params = list(model.parameters())
                         optimizer.add_param_group({'params': params})
 
-        yield epoch
+        yield epoch + 1
 
 
 def evaluate(model, data):
@@ -98,92 +99,105 @@ def evaluate(model, data):
         # of sampled shared weights
 
         acc = 0
-        
+
+        n_weights = model.shared_weight.size()[0]
+
         for x, y in data:
 
-            x = x.unsqueeze(dim=0).expand((model.shared_weight.size()[0], -1, -1))
+            x = x.unsqueeze(dim=0).expand((n_weights, -1, -1))
+            y = y.repeat(n_weights)
 
             predict_out = model(x).view(-1, model.out_features)
-
             _, predict_y = torch.max(predict_out, 1)
-            
-            acc += 1/len(data) * accuracy_score(y.repeat(model.shared_weight.size()).data, predict_y.data)
-        
+
+            acc += 1/len(data) * accuracy_score(y.data, predict_y.data)
+
         return acc
 
 
 def dist_uniform(a, b, size):
-    sample = np.random.uniform(a, b, tuple(size)).astype('float32')
+    sample = np.random.uniform(a, b, int(size)).astype('float32')
     return torch.from_numpy(sample)
 
 
 def dist_normal(mu, sigma, size):
-    sample = np.random.normal(mu, sigma, tuple(size)).astype('float32')
+    sample = np.random.normal(mu, sigma, int(size)).astype('float32')
     return torch.from_numpy(sample)
 
 
 def dist_lognormal(mu, sigma, size):
-    sample = np.random.lognormal(mu, sigma, tuple(size)).astype('float32')
+    sample = np.random.lognormal(mu, sigma, int(size)).astype('float32')
     return torch.from_numpy(sample)
 
 
-def run_experiment(*, mnist_size=28*28, num_weights=10, layer_sizes=None,
-                   epochs=400, use_ste=False, use_alpha_blending=True,
-                   distribution=partial(dist_uniform, -2, 2),
-                   distribution_descr='', run_name='MNIST', lr=0.1,
-                   batch_size=64, directory='tmp_series'):
+def dist_linspace(a, b, size):
+    return torch.linspace(a, b, int(size))
+
+
+defaults = dict(
+    num_weights=10, layer_sizes=None,
+    epochs=400, lr=0.1, batch_size=64,
+    use_ste=False, use_alpha_blending=True,
+    distribution=('uniform', partial(dist_uniform, -2, 2)),
+    run_name='MNIST', directory='tmp_series'
+)
+
+
+def run_experiment(**params):
+    d = dict(defaults)
+    d.update(params)
 
     # initialize writer for logging data to tensorboard
-    
-    run_dir = get_vacant_file_name(os.path.join(directory, run_name))
+
+    run_dir = get_vacant_file_name(os.path.join(d['directory'], d['run_name']))
     os.mkdir(run_dir)
 
-    writer = SummaryWriter(f"{run_dir}/summary")
+    use_ste, use_alpha_blending = dict(
+        ste=(True, False),
+        ab=(False, True),
+        hybrid=(True, True),
+    )[d['update_mechanism']]
 
-    logging.info("Starting experiment")
-    logging.info(f"Writing data to {writer.log_dir}")
-
-    if mnist_size == 256:
+    if d['mnist_size'] == 256:
         mnist = mnist_256
     else:
         mnist = mnist_full
 
+    dist_descr, dist_func = d['distribution']
+
+    writer = SummaryWriter(os.path.join(run_dir, 'summary'))
+
+    logging.info("Starting experiment")
+    logging.info(f"Writing data to {writer.log_dir}")
+
     logging.info("Loading data")
-    
-    data = mnist()
+
+    train_data = mnist()
     test_data = mnist(test=True)
 
     logging.info("Building the model")
 
     # set shared weights
     def sample_weight(w):
-        w.data = distribution(w.size())
+        w.data = dist_func(d['num_weights'])
 
-    shared_weight = Variable(torch.empty(num_weights))
+    shared_weight = Variable(torch.empty(d['num_weights']))
 
     sample_weight(shared_weight)
 
-    model = Model(shared_weight, mnist_size + 1, 10, layer_sizes)
+    model = Model(shared_weight, d['mnist_size'] + 1, 10, d['layer_sizes'])
     model.init_weight()
 
-    optimizer = torch.optim.SGD(model.parameters(), lr=lr)
+    optimizer = torch.optim.SGD(model.parameters(), lr=d['lr'])
 
-    growing = (layer_sizes is None)
+    growing = (d['layer_sizes'] is None)
 
-    hparams = {
-        'epochs': epochs,
-        'batch size': batch_size,
-        'batches': len(train_data),
-        'learning rate': lr,
-        'number of weights': num_weights,
-        'MNIST': mnist_size,
-        'growing': growing,
-        'layer sizes': str(layer_sizes),
-        'distribution': distribution_descr,
-        'name': run_name,
-        'STE': use_ste,
-        'Alpha-Blending': use_alpha_blending,
-    }
+    hparams = dict(d)
+    hparams['batches'] = len(train_data)
+    hparams['growing'] = growing
+    hparams['distribution'] = dist_descr
+    hparams['use_ste'] = use_ste
+    hparams['use_ab'] = use_alpha_blending
 
     logging.info("Parameters:")
     logging.info(tabulate(hparams.items(), tablefmt='grid'))
@@ -192,7 +206,7 @@ def run_experiment(*, mnist_size=28*28, num_weights=10, layer_sizes=None,
 
     start_time = time.time()
 
-    for epoch in train(optimizer, model, data=train_data, epochs=epochs,
+    for epoch in train(optimizer, model, data=train_data, epochs=d['epochs'],
                        writer=writer, grow=growing, use_ste=use_ste,
                        use_alpha_blending=use_alpha_blending):
         ls = model.layer_sizes()
@@ -210,44 +224,32 @@ def run_experiment(*, mnist_size=28*28, num_weights=10, layer_sizes=None,
         ]:
             writer.add_scalar(label, s, epoch * len(train_data))
 
-        if (epoch + 1) % 10 == 0:
+        if epoch % 10 == 0 or epoch == d['epochs']:
             sample_weight(shared_weight)
-            write_hist(writer, model, (epoch + 1))
+            write_hist(writer, model, epoch)
             acc = evaluate(model, data=test_data)
             writer.add_scalar('Evaluation/Accurary on Test Data; discretized',
-                              acc, (epoch + 1))
-            logging.info(f"Completed {(epoch + 1)} epochs. Current acc: {acc}")
+                              acc, epoch)
+            logging.info(f"Completed {epoch } epochs. Current acc: {acc}")
 
-    elapsed_time = time.time() - start_time
+    results = dict(
+        accuracy=acc, elapsed_time=time.time() - start_time,
+    )
 
-    writer.add_hparams(hparams, dict(
-        accuracy=acc,
-    ))
+    writer.add_hparams({k:v for k,v in hparams.items() if any([isinstance(v, t) for t in (int, float, str, bool, torch.Tensor)])}, results)
     writer.close()
 
-    logging.info("Saving model.")
-    torch.save(model.to_dict(), os.path.join(run_dir, 'model.pt')
+    hparams.update(results)
 
-    with open(f"{run_dir}/layer_sizes.txt", 'w') as f:
-        f.write('\n'.join(map(str, (
-                    [model.in_features]
-                    + list(model.layer_sizes().numpy())
-                    + [model.out_features]
-               ))))
+    logging.info("Saving model.")
+    torch.save(model.to_dict(), os.path.join(run_dir, 'model.pt'))
+
+    with open(os.path.join(run_dir, 'hparams.toml'), 'w') as f:
+        f.write(toml.dumps(hparams))
 
     logging.info("Done.")
-    
-    res = dict(params)
-    res['accuracy'] = acc
-    res['update_mechanism'] = update_mechanism
-    res['run_name'] = run_name
-    res['distribution'] = dist_descr
-    res['elapsed_time'] = elapsed_time
-    
-    with open(os.path.join(run_dir, 'params.toml'), 'w') as f:
-        f.write(toml.dumps(res))
-        
-    return red
+
+    return hparams
 
 
 def run_series(**parameters):
@@ -296,37 +298,21 @@ def run_series(**parameters):
         for k, v in zip(variable_params.keys(), var_values):
             params[k] = v
 
-        dist_descr, dist_func = params.pop('distribution')
-        rep = params.pop('repetitions')
-        update_mechanism = params.pop('update_mechanism')
+        params['repetition'] = params.pop('repetitions')
 
-        run_name = "MNIST-{mnist_size}_{grow}-{update}_{epochs}epochs-{batch_size}_{lr}_{dist}-{num_weights}_{rep}".format(
-            rep=rep, dist=dist_descr,
-            update=update_mechanism,
+        run_name = "MNIST-{mnist_size}_{grow}-{update_mechanism}_{epochs}epochs-{batch_size}_{lr}_{dist}-{num_weights}_{repetition}".format(
+            dist=params['distribution'][0],
             grow='growing' if params['layer_sizes'] is None else 'static',
             **params
         )
 
         logging.info(f"Run {run_name}")
 
-        use_ste, use_alpha_blending = dict(
-            ste=(True, False),
-            ab=(False, True),
-            hybrid=(True, True),
-        )[update_mechanism]
-
         res = run_experiment(
-            use_ste=use_ste,
-            use_alpha_blending=use_alpha_blending,
-            distribution=dist_func,
-            distribution_descr=dist_descr,
             directory=directory,
             run_name=run_name,
             **params
             )
-
-        
-        
 
         data.append(res)
 
@@ -335,17 +321,15 @@ def run_series(**parameters):
 
 if __name__ == '__main__':
     series = dict(
-        path='mnist_study_2',
-        num_weights=5,
+        path='data/mnist_uniform',
+        num_weights=10,
         epochs=100,
         batch_size=64,
         distribution=(
-            ('uniform', partial(dist_uniform, -2, 2)),
-            ('constant', torch.ones),
-            ('lognormal', partial(dist_lognormal, 0, 0.5))
+            ('linspace', partial(dist_linspace, -2, 2)),
         ),
         mnist_size=(16*16, 28*28),
-        update_mechanism=('ste', 'ab', 'hybrid'),
+        update_mechanism='hybrid',#('ste', 'ab', 'hybrid'),
         layer_sizes=(None, [64]*4),  # None -> growing model
         lr=1,
         repetitions=4,
