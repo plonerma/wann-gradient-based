@@ -1,10 +1,10 @@
-from itertools import product
+from itertools import product, count
 from functools import partial, reduce
 
 import torch
 from torch.utils.tensorboard import SummaryWriter
 from torch.autograd import Variable
-from torch.utils.data import DataLoader, TensorDataset
+
 
 from sklearn.metrics import accuracy_score
 
@@ -15,6 +15,28 @@ from tasks.mnist import mnist_256, mnist_full
 import numpy as np
 
 from tabulate import tabulate
+
+import os
+import os.path
+
+import time
+
+import pandas as pd
+
+import logging
+
+
+def get_vacant_file_name(fn):
+    i = None
+
+    if os.path.exists(fn):
+        for i in count():
+            _fn = f'{fn}-{i}'
+            if not os.path.exists(_fn):
+                logging.warning(f"Filename {fn} already taken. Using {_fn} instead.")
+                return _fn
+    else:
+        return fn
 
 
 def train(optimizer, model, data, epochs=100,
@@ -42,9 +64,9 @@ def train(optimizer, model, data, epochs=100,
                 loss.backward()
 
             if not use_ste:
-                for group in optimizer.param_groups:
-                    for p in group['params']:
-                        p.grad = p.grad * (1-alpha)
+                with torch.no_grad():
+                    for p in model.parameters():
+                        p.grad.data = p.grad * (1-alpha)
 
             # update original weights
             optimizer.step()
@@ -75,16 +97,19 @@ def evaluate(model, data):
         # add another dimenstion for weights and expand input for the number
         # of sampled shared weights
 
-        x, y = data
+        acc = 0
+        
+        for x, y in data:
 
-        x = x.unsqueeze(dim=0).expand((model.shared_weight.size()[0], -1, -1))
+            x = x.unsqueeze(dim=0).expand((model.shared_weight.size()[0], -1, -1))
 
-        predict_out = model(x).view(-1, model.out_features)
+            predict_out = model(x).view(-1, model.out_features)
 
-        _, predict_y = torch.max(predict_out, 1)
-
-        return accuracy_score(y.repeat(model.shared_weight.size()).data,
-                              predict_y.data)
+            _, predict_y = torch.max(predict_out, 1)
+            
+            acc += 1/len(data) * accuracy_score(y.repeat(model.shared_weight.size()).data, predict_y.data)
+        
+        return acc
 
 
 def dist_uniform(a, b, size):
@@ -105,38 +130,30 @@ def dist_lognormal(mu, sigma, size):
 def run_experiment(*, mnist_size=28*28, num_weights=10, layer_sizes=None,
                    epochs=400, use_ste=False, use_alpha_blending=True,
                    distribution=partial(dist_uniform, -2, 2),
-                   distribution_descr='', model_file_name=None, lr=0.1,
-                   batch_size=64):
+                   distribution_descr='', run_name='MNIST', lr=0.1,
+                   batch_size=64, directory='tmp_series'):
 
     # initialize writer for logging data to tensorboard
-    writer = SummaryWriter(comment='_mnist_{}'.format(str(mnist_size)))
+    
+    run_dir = get_vacant_file_name(os.path.join(directory, run_name))
+    os.mkdir(run_dir)
 
-    print("Starting experiment")
+    writer = SummaryWriter(f"{run_dir}/summary")
+
+    logging.info("Starting experiment")
+    logging.info(f"Writing data to {writer.log_dir}")
 
     if mnist_size == 256:
         mnist = mnist_256
     else:
         mnist = mnist_full
 
-    print("Loading data")
-    x, y = mnist()
+    logging.info("Loading data")
+    
+    data = mnist()
+    test_data = mnist(test=True)
 
-    # add bias to the inputs
-    x = np.hstack([x, np.ones((x.shape[0], 1))])
-
-    train_data = DataLoader(
-        TensorDataset(torch.Tensor(x).float(), torch.Tensor(y)),
-        batch_size=batch_size, shuffle=True)
-
-    test_x, test_y = mnist(test=True)
-
-    # add bias to the test inputs
-    test_x = np.hstack([test_x, np.ones((test_x.shape[0], 1))])
-
-    test_data = Variable(torch.Tensor(test_x).float()), \
-                Variable(torch.Tensor(test_y).long())
-
-    print("Building the model")
+    logging.info("Building the model")
 
     # set shared weights
     def sample_weight(w):
@@ -145,7 +162,6 @@ def run_experiment(*, mnist_size=28*28, num_weights=10, layer_sizes=None,
     shared_weight = Variable(torch.empty(num_weights))
 
     sample_weight(shared_weight)
-
 
     model = Model(shared_weight, mnist_size + 1, 10, layer_sizes)
     model.init_weight()
@@ -164,15 +180,18 @@ def run_experiment(*, mnist_size=28*28, num_weights=10, layer_sizes=None,
         'growing': growing,
         'layer sizes': str(layer_sizes),
         'distribution': distribution_descr,
-        'model file name': model_file_name,
+        'name': run_name,
         'STE': use_ste,
         'Alpha-Blending': use_alpha_blending,
     }
 
-    print("Parameters:")
-    print(tabulate(hparams.items(), tablefmt='grid'))
+    logging.info("Parameters:")
+    logging.info(tabulate(hparams.items(), tablefmt='grid'))
 
-    print("Starting training")
+    logging.info("Starting training")
+
+    start_time = time.time()
+
     for epoch in train(optimizer, model, data=train_data, epochs=epochs,
                        writer=writer, grow=growing, use_ste=use_ste,
                        use_alpha_blending=use_alpha_blending):
@@ -197,32 +216,62 @@ def run_experiment(*, mnist_size=28*28, num_weights=10, layer_sizes=None,
             acc = evaluate(model, data=test_data)
             writer.add_scalar('Evaluation/Accurary on Test Data; discretized',
                               acc, (epoch + 1))
-            print(f"Completed {(epoch + 1)} epochs. Current acc: {acc}")
+            logging.info(f"Completed {(epoch + 1)} epochs. Current acc: {acc}")
+
+    elapsed_time = time.time() - start_time
 
     writer.add_hparams(hparams, dict(
         accuracy=acc,
     ))
     writer.close()
 
-    if model_file_name is not None:
-        print("Saving model.")
-        torch.save(model.to_dict(), model_file_name)
+    logging.info("Saving model.")
+    torch.save(model.to_dict(), os.path.join(run_dir, 'model.pt')
 
+    with open(f"{run_dir}/layer_sizes.txt", 'w') as f:
+        f.write('\n'.join(map(str, (
+                    [model.in_features]
+                    + list(model.layer_sizes().numpy())
+                    + [model.out_features]
+               ))))
 
-    print("Done.")
+    logging.info("Done.")
+    
+    res = dict(params)
+    res['accuracy'] = acc
+    res['update_mechanism'] = update_mechanism
+    res['run_name'] = run_name
+    res['distribution'] = dist_descr
+    res['elapsed_time'] = elapsed_time
+    
+    with open(os.path.join(run_dir, 'params.toml'), 'w') as f:
+        f.write(toml.dumps(res))
+        
+    return red
 
 
 def run_series(**parameters):
-    model_file_name_template = 'models/' + '_'.join(
-        ['mnist'] + [f'{{{x}}}' for x in [
-            'mnist_size', 'grow_descr', 'update_mechanism', 'dist_descr', 'lr',
-            'rep']]
-        ) + '.pt'
-
     const_params = dict()
     variable_params = dict()
 
+    directory = parameters.pop('path')
+
+    if not os.path.exists(directory):
+        os.mkdir(directory)
+
+    logging.getLogger().setLevel(logging.DEBUG)
+
+    fileHandler = logging.FileHandler(os.path.join(directory, 'series.log'))
+    fileHandler.setLevel(logging.DEBUG)
+
+    consoleHandler = logging.StreamHandler()
+    consoleHandler.setLevel(logging.DEBUG)
+
+    logging.getLogger().addHandler(fileHandler)
+    logging.getLogger().addHandler(consoleHandler)
+
     parameters['repetitions'] = tuple(range(parameters.get('repetitions', 1)))
+    skip_experiments = parameters.pop('skip_experiments', 0)
 
     for k, v in parameters.items():
         if isinstance(v, tuple):
@@ -231,10 +280,18 @@ def run_series(**parameters):
             const_params[k] = v
 
     num_experiments = reduce(lambda x, y: x*len(y), variable_params.values(), 1)
-    print(f"Running series of {num_experiments} experiments.")
+    logging.info(f"Running series of {num_experiments} experiments.")
 
-    for var_values in product(*variable_params.values()):
+    data = list()
+
+    for experiment_index, var_values in enumerate(product(*variable_params.values())):
         params = dict(const_params)
+
+        logging.debug(f"Experiment {experiment_index+1}/{num_experiments}")
+
+        if experiment_index < (skip_experiments or 0):
+            logging.debug("Skipping experiment")
+            continue
 
         for k, v in zip(variable_params.keys(), var_values):
             params[k] = v
@@ -243,14 +300,14 @@ def run_series(**parameters):
         rep = params.pop('repetitions')
         update_mechanism = params.pop('update_mechanism')
 
-        model_file_name = model_file_name_template.format(
-            rep=rep, dist_descr=dist_descr,
-            update_mechanism=update_mechanism,
-            grow_descr='growing' if params['layer_sizes'] is None else 'static',
+        run_name = "MNIST-{mnist_size}_{grow}-{update}_{epochs}epochs-{batch_size}_{lr}_{dist}-{num_weights}_{rep}".format(
+            rep=rep, dist=dist_descr,
+            update=update_mechanism,
+            grow='growing' if params['layer_sizes'] is None else 'static',
             **params
         )
 
-        print(f"Building model {model_file_name}")
+        logging.info(f"Run {run_name}")
 
         use_ste, use_alpha_blending = dict(
             ste=(True, False),
@@ -258,29 +315,40 @@ def run_series(**parameters):
             hybrid=(True, True),
         )[update_mechanism]
 
-        run_experiment(
+        res = run_experiment(
             use_ste=use_ste,
             use_alpha_blending=use_alpha_blending,
             distribution=dist_func,
             distribution_descr=dist_descr,
-            model_file_name=model_file_name,
+            directory=directory,
+            run_name=run_name,
             **params
             )
+
+        
+        
+
+        data.append(res)
+
+        pd.DataFrame(data).to_csv(os.path.join(directory, get_vacant_file_name('results.csv')))
 
 
 if __name__ == '__main__':
     series = dict(
-        num_weights=6,
+        path='mnist_study_2',
+        num_weights=5,
         epochs=100,
+        batch_size=64,
         distribution=(
-        #    ('uniform', partial(dist_uniform, -2, 2)),
+            ('uniform', partial(dist_uniform, -2, 2)),
             ('constant', torch.ones),
-        #    ('lognormal', partial(dist_lognormal, 0, 0.5))
+            ('lognormal', partial(dist_lognormal, 0, 0.5))
         ),
-        mnist_size=(28*28,),#(16*16, 28*28)
+        mnist_size=(16*16, 28*28),
         update_mechanism=('ste', 'ab', 'hybrid'),
         layer_sizes=(None, [64]*4),  # None -> growing model
-        lr=(0.01 ,0.05, 0.1, 0.2, 0.5, 1, 2),
-        repetitions=1,
+        lr=1,
+        repetitions=4,
+        skip_experiments=0,
     )
     run_series(**series)

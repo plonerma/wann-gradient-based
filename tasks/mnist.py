@@ -2,6 +2,8 @@ import numpy as np
 
 import cv2
 
+from .util import prepare_data
+
 
 def load_mnist(test=False):
     import mnist
@@ -16,7 +18,7 @@ def load_mnist(test=False):
     return x, y
 
 
-def mnist_256(test=False):
+def mnist_256(test=False, **datafmt):
     '''
     Converts 28x28 mnist digits to [16x16]
     [samples x pixels]  ([N X 256])
@@ -26,17 +28,17 @@ def mnist_256(test=False):
     x = preprocess(x, (16, 16))
     x = x.reshape(-1, (256))
 
-    return x, y
+    return prepare_data(x, y, **datafmt)
 
 
-def mnist_full(test=False):
+def mnist_full(test=False, **datafmt):
     """28x28 mnist digits"""
     x, y = load_mnist(test)
 
     x = preprocess(x)
     x = x.reshape(-1, (28*28))
 
-    return x, y
+    return prepare_data(x, y, **datafmt)
 
 
 def preprocess(images, size=None):

@@ -8,23 +8,26 @@ class Discretizable:
 
     def alpha_blend(self, alpha=1):
         if not self.is_discrete:
-            self.stored_weight.data.copy_(self.weight.data)
+            with torch.no_grad():
+                self.stored_weight.data.copy_(self.weight.data)
 
-            self.weight.data.copy_(
-                (1-alpha) * self.weight
-                + alpha * self.quantized_weight)
-            self.is_discrete = True
+                self.weight.data.copy_(
+                    (1-alpha) * self.weight
+                    + alpha * self.quantized_weight)
+                self.is_discrete = True
 
         # TODO: In Activation Module: Test whether dividing the weight by the
         # sum makes a differences for how the gradient is calculated!
 
     def restore_weight(self):
         if self.is_discrete:
-            self.weight.data.copy_(self.stored_weight.data)
-            self.is_discrete = False
+            with torch.no_grad():
+                self.weight.data.copy_(self.stored_weight.data)
+                self.is_discrete = False
 
     def clip_weight(self):
-        torch.nn.functional.hardtanh(self.weight.data, inplace=True)
+        with torch.no_grad():
+            torch.nn.functional.hardtanh(self.weight.data, inplace=True)
 
 
 class ActModule(torch.nn.Module, Discretizable):
@@ -65,7 +68,7 @@ class ActModule(torch.nn.Module, Discretizable):
 
     def clip_weight(self):
         length = torch.norm(self.weight.data, dim=0).unsqueeze(dim=0)
-        self.weight.data = self.weight.data / length
+        self.weight.data /= length
 
     @property
     def quantized_weight(self):
@@ -73,19 +76,19 @@ class ActModule(torch.nn.Module, Discretizable):
         return torch.nn.functional.one_hot(indices, self.n_funcs).T.float()
 
     def forward(self, x):
-        coefficients = self.weight
+        # divided again to add division to gradient
+        length = torch.norm(self.weight.data, dim=0).unsqueeze(dim=0)
+        if (length == 0).any():
+            length = 1
 
-        return reduce(
-            lambda first, act: (
-                torch.add(
-                    first,
-                    torch.mul(
-                        act[1](x),  # apply activation func
-                        coefficients[act[0], :])
-            )),
-            enumerate(self.funcs),  # index, func
-            torch.zeros_like(x)  # start value
-        )
+        coefficients = self.weight / length
+
+        y = torch.zeros_like(x)
+
+        for act_i, act_func in enumerate(self.funcs):
+            y = y.add(act_func(x).mul(coefficients[act_i, :]))
+
+        return y
 
     def append_nodes_out(self, n=1):
         """Adds `n` new blank output node (initialize with near zero weight).
@@ -260,6 +263,9 @@ class ConcatLayer(torch.nn.Module):
         # inputs are spread across dimension 1
         out_indices = torch.arange(self.out_features)
         return out_indices[(self.linear.weight.data.abs() < gamma).all(1)]
+    
+    def recieves_input_from(self, gamma=0.4):
+        return (self.linear.weight.data.abs() >= gamma).any(0)
 
 
 class Model(torch.nn.Module):
@@ -348,21 +354,39 @@ class Model(torch.nn.Module):
         return grew
 
     def cleanup(self):
+        deleted_something = False
+    
+        # delete nodes without input
         for i, layer in enumerate(self.hidden_layers):
-            nodes_to_delete = layer.nodes_without_input(self.gamma)
-            if nodes_to_delete.shape[0] > 0:
-                layer.delete_nodes_out(nodes_to_delete)
+            self.delete_nodes(layer.nodes_without_input(self.gamma) + layer.in_features)
+        
+        # delete nodes that aren't used as inputs in later layers
+        for i, layer in reversed(list(enumerate(self.hidden_layers))):
+            
+            used_as_input = torch.zeros(layer.out_features, dtype=bool)
+            
+            for later_layer in list(self.layers(hidden_only=False))[i+1:]:
+                used_as_input = used_as_input | later_layer.recieves_input_from()[layer.in_features:layer.in_features+layer.out_features]
 
-                # add offset for global indices
-                nodes_to_delete += layer.in_features
-                for later_hidden in self.hidden_layers[i+1:]:
-                    later_hidden.delete_nodes_in(nodes_to_delete)
-                self.output_layer.delete_nodes_in(nodes_to_delete)
+            self.delete_nodes(torch.arange(layer.out_features)[~used_as_input] + layer.in_features)
+            
+        self.delete_empty_layers()
 
+    def delete_empty_layers(self):
         # go though layers in reverse order to preserve correctness of indices
         for i in reversed(range(len(self.hidden_layers))):
             if self.hidden_layers[i].out_features == 0:
                 del self.hidden_layers[i]
+    
+    def delete_nodes(self, nodes):
+        if nodes.shape[0] == 0:
+            return
+
+        for layer in self.layers():    
+            in_nodes = (nodes < layer.in_features)
+            out_nodes = (nodes >= layer.in_features) & (nodes < (layer.in_features + layer.out_features))
+            layer.delete_nodes_in(nodes[in_nodes])
+            layer.delete_nodes_out(nodes[out_nodes] - layer.in_features)  
 
     def to_dict(self):
         return {
@@ -371,9 +395,21 @@ class Model(torch.nn.Module):
         }
 
     @classmethod
-    def from_dict(cls, shared_weight, n_in, n_out, d):
-        m = cls(shared_weight, n_in, n_out, hidden_layer_sizes=d['hidden_layer_sizes'])
-        m.load_state_dict(d['state'])
+    def from_dict(cls, shared_weight, state):
+        if 'hidden_layers.0.linear.weight' in state:
+            n_in = state['hidden_layers.0.linear.weight'].size()[1]
+        else:
+            n_in = state['output_layer.linear.weight'].size()[1]
+        
+        n_out = state['output_layer.linear.weight'].size()[0]
+        
+        hidden_layer_sizes = list()
+        for k, v in state.items():
+            if k.startswith('hidden_layers.') and k.endswith('.linear.weight'):
+                hidden_layer_sizes.append(v.size()[0])
+                
+        m = cls(shared_weight, n_in, n_out, hidden_layer_sizes=hidden_layer_sizes)
+        m.load_state_dict(state)
         return m
 
     @contextmanager
