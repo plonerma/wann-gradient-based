@@ -27,6 +27,8 @@ import logging
 
 import toml
 
+from param_util import ParamParser, nested_update
+
 
 def get_vacant_file_name(fn):
     i = None
@@ -35,14 +37,15 @@ def get_vacant_file_name(fn):
         for i in count():
             _fn = f'{fn}-{i}'
             if not os.path.exists(_fn):
-                logging.warning(f"Filename {fn} already taken. Using {_fn} instead.")
+                logging.warning(
+                    f"Filename {fn} already taken. Using {_fn} instead.")
                 return _fn
     else:
         return fn
 
 
 def train(optimizer, model, data, epochs=100,
-          use_alpha_blending=True, use_ste=False, grow=False, writer=None):
+          use_ab=True, use_ste=False, grow=False, writer=None):
     n_weights = model.shared_weight.size()[0]
     criterion = torch.nn.CrossEntropyLoss()  # cross entropy loss
 
@@ -54,7 +57,8 @@ def train(optimizer, model, data, epochs=100,
 
             optimizer.zero_grad()
 
-            if use_alpha_blending:
+            # alpha blending
+            if use_ab:
                 alpha = (epoch * len(data) + i) / (epochs * len(data))
             else:
                 alpha = 1
@@ -66,7 +70,7 @@ def train(optimizer, model, data, epochs=100,
 
             if not use_ste:
                 with torch.no_grad():
-                    for p in model.parameters():
+                    for p in model.params():
                         p.grad.data = p.grad * (1-alpha)
 
             # update original weights
@@ -82,7 +86,7 @@ def train(optimizer, model, data, epochs=100,
                 with torch.no_grad():
                     # grow model if necessary
                     if model.grow():
-                        # update parameters in optimizer
+                        # update params in optimizer
 
                         # This is ugly, but it seems to be the simplest way
                         optimizer.param_groups = list()
@@ -130,40 +134,76 @@ def dist_lognormal(mu, sigma, size):
     return torch.from_numpy(sample)
 
 
-def dist_linspace(a, b, size):
-    return torch.linspace(a, b, int(size))
+distributions = {
+    'const': torch.ones,
+    'linspace': torch.linspace,
+    'uniform': dist_uniform,
+    'normal': dist_normal,
+    'lognormal': dist_lognormal
+}
 
 
-defaults = dict(
-    num_weights=10, layer_sizes=None,
-    epochs=400, lr=0.1, batch_size=64,
-    use_ste=False, use_alpha_blending=True,
-    distribution=('uniform', partial(dist_uniform, -2, 2)),
-    run_name='MNIST', directory='tmp_series'
-)
+def get_dist_descr(params):
+    dist = params['distribution']
+
+    if isinstance(dist, str):
+        return dist
+    elif 'params' not in dist:
+        return dist['name']
+    else:
+        params = ', '.join([str(p) for p in dist['params']])
+        return f"{dist['name']} ({params})"
+
+
+def get_dist_func(params):
+    dist = params['distribution']
+
+    if isinstance(dist, str):
+        name = dist
+        params = []
+
+    else:
+        name = dist['name']
+        if 'params' in dist:
+            params = dist['params']
+
+    assert name == 'const' or len(params) == 2
+
+    return partial(distributions[name], *params)
+
+
+def is_growing(params):
+    model = params['model']
+    return (
+        (isinstance(model, str) and model.lower().strip() == 'growing')
+        or ('growing' in model and model['growing']))
+
+
+def get_layer_sizes(params):
+    if is_growing(params):
+        return None
+    else:
+        return params['model']['layer_sizes']
 
 
 def run_experiment(**params):
-    d = dict(defaults)
-    d.update(params)
-
     # initialize writer for logging data to tensorboard
 
-    run_dir = get_vacant_file_name(os.path.join(d['directory'], d['run_name']))
+    run_dir = get_vacant_file_name(
+        os.path.join(params['directory'], params['run_name']))
+
     os.mkdir(run_dir)
 
-    use_ste, use_alpha_blending = dict(
+    use_ste, use_ab = dict(
         ste=(True, False),
         ab=(False, True),
         hybrid=(True, True),
-    )[d['update_mechanism']]
+    )[params['update_mechanism']]
 
-    if d['mnist_size'] == 256:
+    if params['mnist_size'] == 256:
         mnist = mnist_256
     else:
         mnist = mnist_full
-
-    dist_descr, dist_func = d['distribution']
 
     writer = SummaryWriter(os.path.join(run_dir, 'summary'))
 
@@ -172,43 +212,49 @@ def run_experiment(**params):
 
     logging.info("Loading data")
 
-    train_data = mnist()
-    test_data = mnist(test=True)
+    train_data = mnist(batch_size=params['batch_size'])
+    test_data = mnist(test=True, batch_size=params['batch_size'])
 
     logging.info("Building the model")
 
+    dist_func = get_dist_func(params)
+
     # set shared weights
     def sample_weight(w):
-        w.data = dist_func(d['num_weights'])
+        w.data = dist_func(params['num_weights'])
 
-    shared_weight = Variable(torch.empty(d['num_weights']))
+    shared_weight = Variable(torch.empty(params['num_weights']))
 
     sample_weight(shared_weight)
 
-    model = Model(shared_weight, d['mnist_size'] + 1, 10, d['layer_sizes'])
+    model = Model(
+        shared_weight, params['mnist_size'] + 1, 10, get_layer_sizes(params))
     model.init_weight()
 
-    optimizer = torch.optim.SGD(model.parameters(), lr=d['lr'])
+    optimizer = torch.optim.SGD(model.parameters(), lr=params['lr'])
 
-    growing = (d['layer_sizes'] is None)
+    hparams = dict(
+        batches=len(train_data),
+        growing=is_growing(params),
+        distribution=get_dist_descr(params),
+        use_ste=use_ste,
+        use_ab=use_ab
+    )
 
-    hparams = dict(d)
-    hparams['batches'] = len(train_data)
-    hparams['growing'] = growing
-    hparams['distribution'] = dist_descr
-    hparams['use_ste'] = use_ste
-    hparams['use_ab'] = use_alpha_blending
+    hparams.update(params)
 
-    logging.info("Parameters:")
+    logging.info("params:")
     logging.info(tabulate(hparams.items(), tablefmt='grid'))
 
     logging.info("Starting training")
 
     start_time = time.time()
 
-    for epoch in train(optimizer, model, data=train_data, epochs=d['epochs'],
-                       writer=writer, grow=growing, use_ste=use_ste,
-                       use_alpha_blending=use_alpha_blending):
+    for epoch in train(optimizer, model, data=train_data,
+                       epochs=params['epochs'],
+                       writer=writer, grow=is_growing(params),
+                       use_ste=use_ste, use_ab=use_ab):
+
         ls = model.layer_sizes()
 
         for label, s, in [
@@ -224,7 +270,7 @@ def run_experiment(**params):
         ]:
             writer.add_scalar(label, s, epoch * len(train_data))
 
-        if epoch % 10 == 0 or epoch == d['epochs']:
+        if epoch % 10 == 0 or epoch == params['epochs']:
             sample_weight(shared_weight)
             write_hist(writer, model, epoch)
             acc = evaluate(model, data=test_data)
@@ -236,7 +282,12 @@ def run_experiment(**params):
         accuracy=acc, elapsed_time=time.time() - start_time,
     )
 
-    writer.add_hparams({k:v for k,v in hparams.items() if any([isinstance(v, t) for t in (int, float, str, bool, torch.Tensor)])}, results)
+    writer.add_hparams({
+        k: v for k, v in hparams.items()
+        if any([
+            isinstance(v, t)
+            for t in (int, float, str, bool, torch.Tensor)
+        ])}, results)
     writer.close()
 
     hparams.update(results)
@@ -252,57 +303,80 @@ def run_experiment(**params):
     return hparams
 
 
-def run_series(**parameters):
-    const_params = dict()
-    variable_params = dict()
-
-    directory = parameters.pop('path')
+def run_series(**params):
+    directory = params.pop('path')
 
     if not os.path.exists(directory):
         os.mkdir(directory)
 
-    logging.getLogger().setLevel(logging.DEBUG)
-
     fileHandler = logging.FileHandler(os.path.join(directory, 'series.log'))
     fileHandler.setLevel(logging.DEBUG)
 
-    consoleHandler = logging.StreamHandler()
-    consoleHandler.setLevel(logging.DEBUG)
+    formatter = logging.Formatter('[%(asctime)s] %(message)s')
+    fileHandler.setFormatter(formatter)
 
-    logging.getLogger().addHandler(fileHandler)
-    logging.getLogger().addHandler(consoleHandler)
+    logging.root.addHandler(fileHandler)
 
-    parameters['repetitions'] = tuple(range(parameters.get('repetitions', 1)))
-    skip_experiments = parameters.pop('skip_experiments', 0)
+    df_path = get_vacant_file_name(os.path.join(directory, 'results.csv'))
 
-    for k, v in parameters.items():
-        if isinstance(v, tuple):
+    logging.debug(f'Storing results in {df_path}.')
+
+    params['repetition'] = list(range(params.pop('repetitions', 1)))
+    start_at = params.pop('start_at', 0)
+    stop_at = params.pop('stop_at', 0)
+
+    const_params = dict()
+    variable_params = dict()
+
+    for k, v in params.items():
+        if isinstance(v, list):
             variable_params[k] = v
         else:
             const_params[k] = v
 
-    num_experiments = reduce(lambda x, y: x*len(y), variable_params.values(), 1)
-    logging.info(f"Running series of {num_experiments} experiments.")
+    num_total_experiments = reduce(
+        lambda x, y: x*len(y), variable_params.values(), 1)
+
+    if stop_at < 0:
+        stop_at = num_total_experiments
+
+    if stop_at > start_at:
+        num_experiments_to_run = stop_at - start_at
+    else:
+        num_experiments_to_run = 0
+
+    logging.info(
+        f"Running {num_experiments_to_run} "
+        f"of {num_total_experiments} experiments.")
 
     data = list()
 
-    for experiment_index, var_values in enumerate(product(*variable_params.values())):
-        params = dict(const_params)
+    experiments = product(*variable_params.values())
 
-        logging.debug(f"Experiment {experiment_index+1}/{num_experiments}")
+    for experiment_index, var_values in enumerate(experiments):
 
-        if experiment_index < (skip_experiments or 0):
-            logging.debug("Skipping experiment")
+        if experiment_index < (start_at or 0):
             continue
 
-        for k, v in zip(variable_params.keys(), var_values):
-            params[k] = v
+        if experiment_index >= stop_at:
+            logging.debug(f'Stopping (since stop_at={stop_at}).')
+            break
 
-        params['repetition'] = params.pop('repetitions')
+        logging.debug(
+            f"Experiment {experiment_index+1}/{num_total_experiments}")
 
-        run_name = "MNIST-{mnist_size}_{grow}-{update_mechanism}_{epochs}epochs-{batch_size}_{lr}_{dist}-{num_weights}_{repetition}".format(
-            dist=params['distribution'][0],
-            grow='growing' if params['layer_sizes'] is None else 'static',
+        params = dict()
+        nested_update(params, const_params)
+        nested_update(params, dict(zip(variable_params.keys(), var_values)))
+
+        run_name = (
+            "MNIST-{mnist_size}_"
+            "{grow}-{update_mechanism}_"
+            "{epochs}epochs-{batch_size}_"
+            "{lr}_{dist}-{num_weights}_{repetition}"
+        ).format(
+            dist=get_dist_descr(params),
+            grow='growing' if is_growing(params) else 'static',
             **params
         )
 
@@ -316,23 +390,58 @@ def run_series(**parameters):
 
         data.append(res)
 
-        pd.DataFrame(data).to_csv(os.path.join(directory, get_vacant_file_name('results.csv')))
+        pd.DataFrame(data).to_csv(df_path)
 
 
 if __name__ == '__main__':
-    series = dict(
-        path='data/mnist_uniform',
-        num_weights=10,
+    logging.root.setLevel(logging.DEBUG)
+
+    sh = logging.StreamHandler()
+    sh.setLevel(logging.DEBUG)
+    logging.root.addHandler(sh)
+
+    parser = ParamParser()
+
+    # default params
+    params = dict(
+        path='series_data',
+        num_weights=1,
+        epochs=1,
+        batch_size=1,
+        distribution='const',
+        mnist_size=784,
+        update_mechanism='ab',
+        model='growing',
+        lr=1,
+        repetitions=1,
+        start_at=0,
+        =-1
+    )
+
+    parsed_params = parser.parse_params()
+
+    if len(parsed_params) == 0:
+        logging.warning('No parameters defined. Using only default values.')
+
+    nested_update(params, parsed_params)
+
+    """series = dict(
+        path='data/mnist_long_trial_2',
+        num_weights=6,
         epochs=100,
         batch_size=64,
         distribution=(
             ('linspace', partial(dist_linspace, -2, 2)),
+            ('uniform', partial(dist_uniform, -2, 2)),
+            ('constant', torch.ones),
+            ('lognormal', partial(dist_lognormal, 0, 1)),
         ),
         mnist_size=(16*16, 28*28),
-        update_mechanism='hybrid',#('ste', 'ab', 'hybrid'),
+        update_mechanism=('ste', 'ab', 'hybrid'),
         layer_sizes=(None, [64]*4),  # None -> growing model
-        lr=1,
-        repetitions=4,
-        skip_experiments=0,
-    )
-    run_series(**series)
+        lr=(.5,1,2),
+        repetitions=3,
+        skip_experiments=54,
+    )"""
+
+    run_series(**params)
