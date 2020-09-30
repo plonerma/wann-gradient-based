@@ -303,6 +303,24 @@ def run_experiment(**params):
     return hparams
 
 
+def get_const_var_params(params):
+    const_params = dict()
+    variable_params = dict()
+
+    for k, v in params.items():
+        if isinstance(v, list):
+            variable_params[k] = v
+        else:
+            const_params[k] = v
+
+    variable_params['repetition'] = list(range(params.get('repetitions', 1)))
+
+    return const_params, variable_params
+
+def get_num_total_experiments(variable_params):
+    return reduce(
+        lambda x, y: x*len(y), variable_params.values(), 1)
+
 def run_series(**params):
     directory = params.pop('path')
 
@@ -321,21 +339,12 @@ def run_series(**params):
 
     logging.debug(f'Storing results in {df_path}.')
 
-    params['repetition'] = list(range(params.pop('repetitions', 1)))
     start_at = params.pop('start_at', 0)
     stop_at = params.pop('stop_at', 0)
 
-    const_params = dict()
-    variable_params = dict()
+    const_params, variable_params = get_const_var_params(params)
 
-    for k, v in params.items():
-        if isinstance(v, list):
-            variable_params[k] = v
-        else:
-            const_params[k] = v
-
-    num_total_experiments = reduce(
-        lambda x, y: x*len(y), variable_params.values(), 1)
+    num_total_experiments = get_num_total_experiments(variable_params)
 
     if stop_at < 0:
         stop_at = num_total_experiments
@@ -402,6 +411,10 @@ if __name__ == '__main__':
 
     parser = ParamParser()
 
+    parser.add_argument(
+        "--num_experiments", action='store_true'
+    )
+
     # default params
     params = dict(
         path='series_data',
@@ -418,12 +431,18 @@ if __name__ == '__main__':
         stop_at=-1
     )
 
-    parsed_params = parser.parse_params()
+    args = parser.parse_args()
+    parsed_params = args.params
 
     if len(parsed_params) == 0:
         logging.warning('No parameters defined. Using only default values.')
 
     nested_update(params, parsed_params)
+
+    if args.num_experiments:
+        _, var_params = get_const_var_params(params)
+        print(get_num_total_experiments(var_params))
+        quit(0)
 
     """series = dict(
         path='data/mnist_long_trial_2',
