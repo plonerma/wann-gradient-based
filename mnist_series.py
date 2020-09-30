@@ -415,7 +415,7 @@ if __name__ == '__main__':
         lr=1,
         repetitions=1,
         start_at=0,
-        =-1
+        stop_at=-1
     )
 
     parsed_params = parser.parse_params()
