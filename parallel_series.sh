@@ -21,7 +21,7 @@ function wait_for_child {
   if [ $? -ne 0 ];
   then
     ERROR_MSG=$(tail series.err)
-    ./rewann-remote/telegram-alert.sh "Some experiment in $SERIES_FILE failed: $ERROR_MSG"
+    ./rewann-remote/telegram-alert.sh "Some experiment in $SERIES_FILE failed."
     exit 1
   fi
 }
