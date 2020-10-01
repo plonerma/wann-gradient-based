@@ -1,0 +1,15 @@
+path='data/mnist_extensive_01'
+num_weights=6
+epochs=100
+batch_size=64
+distribution=[
+  {name='linspace', params=[-2, 2]},
+  {name='uniform', params=[-2, 2]},
+  {name='constant'},
+  {name='lognormal', params=[0, 1]},
+]
+mnist_size=[256, 784]
+update_mechanism=['ste', 'ab', 'hybrid']
+model=[{growing=true}, {layer_sizes=[64, 64, 64, 64]}]
+lr=[0.5,1.0,2.0]
+repetitions=3
