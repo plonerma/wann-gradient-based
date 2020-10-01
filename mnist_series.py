@@ -70,7 +70,7 @@ def train(optimizer, model, data, epochs=100,
 
             if not use_ste:
                 with torch.no_grad():
-                    for p in model.params():
+                    for p in model.parameters():
                         p.grad.data = p.grad * (1-alpha)
 
             # update original weights
