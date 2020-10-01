@@ -135,7 +135,7 @@ def dist_lognormal(mu, sigma, size):
 
 
 distributions = {
-    'const': torch.ones,
+    'constant': torch.ones,
     'linspace': torch.linspace,
     'uniform': dist_uniform,
     'normal': dist_normal,
