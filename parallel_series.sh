@@ -4,6 +4,8 @@ MAX_CHILDREN=8
 SERIES_FILE="mnist_extensive.toml"
 STEP=40
 
+. ../venv/bin/activate
+
 
 NUM_EXPERIMENTS=$(python mnist_series.py --from $SERIES_FILE --num_experiments)
 
