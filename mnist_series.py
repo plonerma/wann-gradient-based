@@ -167,7 +167,7 @@ def get_dist_func(params):
         if 'params' in dist:
             params = dist['params']
 
-    assert name == 'const' or len(params) == 2
+    assert name == 'constant' or len(params) == 2
 
     return partial(distributions[name], *params)
 
@@ -421,7 +421,7 @@ if __name__ == '__main__':
         num_weights=1,
         epochs=1,
         batch_size=1,
-        distribution='const',
+        distribution='constant',
         mnist_size=784,
         update_mechanism='ab',
         model='growing',
