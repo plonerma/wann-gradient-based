@@ -158,18 +158,18 @@ def get_dist_descr(params):
 def get_dist_func(params):
     dist = params['distribution']
 
+    dist_params = list()
+
     if isinstance(dist, str):
-        name = dist
-        params = []
-
+        dist_name = dist
     else:
-        name = dist['name']
+        dist_name = dist['name']
         if 'params' in dist:
-            params = dist['params']
+            dist_params = dist['params']
 
-    assert name == 'constant' or len(params) == 2
+    assert dist_name == 'constant' or len(dist_params) == 2
 
-    return partial(distributions[name], *params)
+    return partial(distributions[dist_name], *dist_params)
 
 
 def is_growing(params):
