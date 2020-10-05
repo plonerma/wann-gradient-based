@@ -45,7 +45,7 @@ for START_AT in $(seq 0 $STEP $NUM_EXPERIMENTS); do
   fi
 
   # execute experiments
-  python mnist_series.py --from $SERIES_FILE --set start_at=$START_AT stop_at=$STOP_AT &
+  nice -19 python mnist_series.py --from $SERIES_FILE --set start_at=$START_AT stop_at=$STOP_AT &
   ./rewann-remote/telegram-alert.sh "Started experiments $SERIES_FILE [$START_AT : $STOP_AT] - pid: $!."
 done
 
