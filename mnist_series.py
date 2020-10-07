@@ -81,8 +81,9 @@ def train(optimizer, model, data, epochs=100,
             # clip weights
             model.clip()
 
-            writer.add_scalar("Loss", loss.data, epoch * len(data) + i)
-            writer.add_scalar("Training/Alpha", alpha, epoch * len(data) + i)
+            if writer:
+                writer.add_scalar("Loss", loss.data, epoch * len(data) + i)
+                writer.add_scalar("Training/Alpha", alpha, epoch * len(data) + i)
 
             if grow:
                 with torch.no_grad():
@@ -206,10 +207,13 @@ def run_experiment(**params):
     else:
         mnist = mnist_full
 
-    writer = SummaryWriter(os.path.join(run_dir, 'summary'))
-
     logging.info("Starting experiment")
-    logging.info(f"Writing data to {writer.log_dir}")
+
+    if params['write_summary']:
+        writer = SummaryWriter(os.path.join(run_dir, 'summary'))
+        logging.info(f"Writing summary to {writer.log_dir}")
+    else:
+        writer = None
 
     logging.info("Loading data")
 
@@ -258,38 +262,43 @@ def run_experiment(**params):
 
         ls = model.layer_sizes()
 
-        for label, s, in [
-            ("Architecture/Num Weights", model.numel()),
-            ("Architecture/Hidden Layers", len(model.hidden_layers)),
-            ("Architecture/Biggest Layer", ls.max()),
-            ("Architecture/Mean Layer", ls.mean()),
-            ("Architecture/Num Nodes", ls.sum()),
-            ("Architecture/Nodes without input",
-             model.nodes_without_input()),
-            ("Architecture/Output nodes without input",
-             model.output_layer.nodes_without_input().shape[0]),
-        ]:
-            writer.add_scalar(label, s, epoch * len(train_data))
+        if writer:
 
-        if epoch % 10 == 0 or epoch == params['epochs']:
+            for label, s, in [
+                ("Architecture/Num Weights", model.numel()),
+                ("Architecture/Hidden Layers", len(model.hidden_layers)),
+                ("Architecture/Biggest Layer", ls.max()),
+                ("Architecture/Mean Layer", ls.mean()),
+                ("Architecture/Num Nodes", ls.sum()),
+                ("Architecture/Nodes without input",
+                 model.nodes_without_input()),
+                ("Architecture/Output nodes without input",
+                 model.output_layer.nodes_without_input().shape[0]),
+            ]:
+                writer.add_scalar(label, s, epoch * len(train_data))
+
+        if (writer and epoch % 10 == 0) or epoch == params['epochs']:
             sample_weight(shared_weight)
-            write_hist(writer, model, epoch)
             acc = evaluate(model, data=test_data)
-            writer.add_scalar('Evaluation/Accurary on Test Data; discretized',
-                              acc, epoch)
             logging.info(f"Completed {epoch } epochs. Current acc: {acc}")
+
+            if writer:
+                write_hist(writer, model, epoch)
+                writer.add_scalar('Evaluation/Accurary on Test Data; discretized',
+                                  acc, epoch)
 
     results = dict(
         accuracy=acc, elapsed_time=time.time() - start_time,
     )
 
-    writer.add_hparams({
-        k: v for k, v in hparams.items()
-        if any([
-            isinstance(v, t)
-            for t in (int, float, str, bool, torch.Tensor)
-        ])}, results)
-    writer.close()
+    if writer:
+        writer.add_hparams({
+            k: v for k, v in hparams.items()
+            if any([
+                isinstance(v, t)
+                for t in (int, float, str, bool, torch.Tensor)
+            ])}, results)
+        writer.close()
 
     hparams.update(results)
 
@@ -431,7 +440,8 @@ if __name__ == '__main__':
         lr=1,
         repetitions=1,
         start_at=0,
-        stop_at=-1
+        stop_at=-1,
+        write_summary=False,
     )
 
     args = parser.parse_args()
