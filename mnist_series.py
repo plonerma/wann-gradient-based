@@ -342,6 +342,8 @@ def run_series(**params):
     start_at = params.pop('start_at', 0)
     stop_at = params.pop('stop_at', 0)
 
+    assert isinstance(start_at, int) and isinstance(stop_at, int)
+
     const_params, variable_params = get_const_var_params(params)
 
     num_total_experiments = get_num_total_experiments(variable_params)
