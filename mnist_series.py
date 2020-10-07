@@ -30,8 +30,10 @@ import toml
 from param_util import ParamParser, nested_update
 
 
-def get_vacant_file_name(fn):
+def vacant_path(*fn):
     i = None
+
+    fn = os.path.join(*fn)
 
     if os.path.exists(fn):
         for i in count():
@@ -189,8 +191,7 @@ def get_layer_sizes(params):
 def run_experiment(**params):
     # initialize writer for logging data to tensorboard
 
-    run_dir = get_vacant_file_name(
-        os.path.join(params['directory'], params['run_name']))
+    run_dir = vacant_path(params['directory'], params['run_name'])
 
     os.mkdir(run_dir)
 
@@ -327,7 +328,7 @@ def run_series(**params):
     if not os.path.exists(directory):
         os.mkdir(directory)
 
-    fileHandler = logging.FileHandler(os.path.join(directory, 'series.log'))
+    fileHandler = logging.FileHandler(vacant_path(directory, 'series.log'))
     fileHandler.setLevel(logging.DEBUG)
 
     formatter = logging.Formatter('[%(asctime)s] %(message)s')
@@ -335,7 +336,7 @@ def run_series(**params):
 
     logging.root.addHandler(fileHandler)
 
-    df_path = get_vacant_file_name(os.path.join(directory, 'results.csv'))
+    df_path = vacant_path(directory, 'results.csv')
 
     logging.debug(f'Storing results in {df_path}.')
 
