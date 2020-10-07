@@ -2,7 +2,7 @@
 
 MAX_CHILDREN=8
 SERIES_FILE="mnist_extensive.toml"
-STEP=40
+STEP=10
 
 . ../venv/bin/activate
 
