@@ -30,20 +30,19 @@ import toml
 from param_util import ParamParser, nested_update
 
 
-def vacant_path(*fn):
-    i = None
-
+def potential_paths(*fn):
     fn = os.path.join(*fn)
 
-    if os.path.exists(fn):
-        for i in count():
-            _fn = f'{fn}-{i}'
-            if not os.path.exists(_fn):
-                logging.warning(
-                    f"Filename {fn} already taken. Using {_fn} instead.")
-                return _fn
-    else:
-        return fn
+    yield fn
+
+    for i in count():
+        yield f'{fn}-{i}'
+
+
+def vacant_path(*fn):
+    for fn in potential_paths(*fn):
+        if not os.path.exists(fn):
+            return fn
 
 
 def train(optimizer, model, data, epochs=100,
@@ -190,9 +189,18 @@ def get_layer_sizes(params):
 
 
 def run_experiment(**params):
-    # initialize writer for logging data to tensorboard
+    for run_dir in potential_paths(params['directory'], params['run_name']):
+        if os.path.exists(run_dir):
+            # check if experiment has been completed
+            hp_path = os.path.join(run_dir, 'hparams.toml')
+            if os.path.exists(hp_path):
+                logging.info(f"Experiment already completed in '{run_dir}' - loading data.")
+                with open(hp_path, 'r') as f:
+                    return toml.load(f)
+        else:
+            break
 
-    run_dir = vacant_path(params['directory'], params['run_name'])
+    logging.info(f"Starting experiment in {run_dir}")
 
     os.mkdir(run_dir)
 
@@ -207,9 +215,8 @@ def run_experiment(**params):
     else:
         mnist = mnist_full
 
-    logging.info("Starting experiment")
-
     if params['write_summary']:
+        # initialize writer for logging data to tensorboard
         writer = SummaryWriter(os.path.join(run_dir, 'summary'))
         logging.info(f"Writing summary to {writer.log_dir}")
     else:
@@ -306,7 +313,7 @@ def run_experiment(**params):
     torch.save(model.to_dict(), os.path.join(run_dir, 'model.pt'))
 
     with open(os.path.join(run_dir, 'hparams.toml'), 'w') as f:
-        f.write(toml.dumps(hparams))
+        toml.dump(hparams, f)
 
     logging.info("Done.")
 
