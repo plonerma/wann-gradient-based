@@ -2,7 +2,7 @@
 
 MAX_CHILDREN=8
 SERIES_FILE=$1
-STEP=10
+STEP=1
 
 if [ "$#" -ne 1 ]; then
     echo "Please provide some series spec file."
