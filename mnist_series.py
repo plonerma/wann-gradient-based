@@ -53,6 +53,8 @@ def train(optimizer, model, data, epochs=100,
     for epoch in range(epochs):
         for i, (x, y) in enumerate(data):
 
+            #logging.debug(f'batch {i} / {len(data)}')
+
             x = x.unsqueeze(dim=0).expand((n_weights, -1, -1))
             y = y.repeat(n_weights)
 
@@ -266,6 +268,8 @@ def run_experiment(**params):
                        epochs=params['epochs'],
                        writer=writer, grow=is_growing(params),
                        use_ste=use_ste, use_ab=use_ab):
+
+        logging.info(f"Completed epoch {epoch}.")
 
         ls = model.layer_sizes()
 
