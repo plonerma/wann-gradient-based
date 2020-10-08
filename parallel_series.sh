@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 
 MAX_CHILDREN=8
-SERIES_FILE="mnist_extensive.toml"
+SERIES_FILE=$1
 STEP=10
+
+if [ "$#" -ne 1 ]; then
+    echo "Please provide some series spec file."
+fi
+
 
 . ../venv/bin/activate
 
