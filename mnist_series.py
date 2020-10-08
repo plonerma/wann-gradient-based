@@ -334,7 +334,11 @@ def get_const_var_params(params):
         else:
             const_params[k] = v
 
-    variable_params['repetition'] = list(range(params.get('repetitions', 1)))
+    rep = params.get('repetitions', 1)
+    if not isinstance(rep, list):
+        rep = list(range(rep))
+
+    variable_params['repetition'] = rep
 
     return const_params, variable_params
 
