@@ -202,9 +202,22 @@ def run_experiment(**params):
         else:
             break
 
-    logging.info(f"Starting experiment in {run_dir}")
-
     os.mkdir(run_dir)
+
+    exp_log_path = os.path.join(run_dir, 'experiment.log')
+
+    expHandler = logging.FileHandler(exp_log_path)
+    expHandler.setLevel(logging.DEBUG)
+
+    formatter = logging.Formatter('[%(asctime)s] %(message)s')
+    expHandler.setFormatter(formatter)
+
+    logging.root.addHandler(expHandler)
+
+    logging.info(f"Starting experiment in {run_dir} "
+                 f"(for full log see: {exp_log_path}).")
+
+
 
     use_ste, use_ab = dict(
         ste=(True, False),
@@ -220,16 +233,16 @@ def run_experiment(**params):
     if params['write_summary']:
         # initialize writer for logging data to tensorboard
         writer = SummaryWriter(os.path.join(run_dir, 'summary'))
-        logging.info(f"Writing summary to {writer.log_dir}")
+        logging.debug(f"Writing summary to {writer.log_dir}")
     else:
         writer = None
 
-    logging.info("Loading data")
+    logging.debug("Loading data")
 
     train_data = mnist(batch_size=params['batch_size'])
     test_data = mnist(test=True, batch_size=params['batch_size'])
 
-    logging.info("Building the model")
+    logging.debug("Building the model")
 
     dist_func = get_dist_func(params)
 
@@ -257,10 +270,10 @@ def run_experiment(**params):
 
     hparams.update(params)
 
-    logging.info("params:")
-    logging.info(tabulate(hparams.items(), tablefmt='grid'))
+    logging.debug("params:")
+    logging.debug(tabulate(hparams.items(), tablefmt='grid'))
 
-    logging.info("Starting training")
+    logging.debug("Starting training")
 
     start_time = time.time()
 
@@ -269,7 +282,7 @@ def run_experiment(**params):
                        writer=writer, grow=is_growing(params),
                        use_ste=use_ste, use_ab=use_ab):
 
-        logging.info(f"Completed epoch {epoch}.")
+        logging.debug(f"Completed epoch {epoch}.")
 
         ls = model.layer_sizes()
 
@@ -291,7 +304,7 @@ def run_experiment(**params):
         if (writer and epoch % 10 == 0) or epoch == params['epochs']:
             sample_weight(shared_weight)
             acc = float(evaluate(model, data=test_data))
-            logging.info(f"Completed {epoch } epochs. Current acc: {acc}")
+            logging.debug(f"Completed {epoch } epochs. Current acc: {acc}")
 
             if writer:
                 write_hist(writer, model, epoch)
@@ -313,13 +326,15 @@ def run_experiment(**params):
 
     hparams.update(results)
 
-    logging.info("Saving model.")
+    logging.debug("Saving model.")
     torch.save(model.to_dict(), os.path.join(run_dir, 'model.pt'))
 
     with open(os.path.join(run_dir, 'hparams.toml'), 'w') as f:
         toml.dump(hparams, f)
 
     logging.info("Done.")
+
+    logging.root.removeHandler(expHandler)
 
     return hparams
 
@@ -353,7 +368,7 @@ def run_series(**params):
         os.mkdir(directory)
 
     fileHandler = logging.FileHandler(vacant_path(directory, 'series.log'))
-    fileHandler.setLevel(logging.DEBUG)
+    fileHandler.setLevel(logging.INFO)
 
     formatter = logging.Formatter('[%(asctime)s] %(message)s')
     fileHandler.setFormatter(formatter)
@@ -433,7 +448,7 @@ if __name__ == '__main__':
     logging.root.setLevel(logging.DEBUG)
 
     sh = logging.StreamHandler()
-    sh.setLevel(logging.DEBUG)
+    sh.setLevel(logging.INFO)
     logging.root.addHandler(sh)
 
     parser = ParamParser()
