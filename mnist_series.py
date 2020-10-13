@@ -290,7 +290,7 @@ def run_experiment(**params):
 
         if (writer and epoch % 10 == 0) or epoch == params['epochs']:
             sample_weight(shared_weight)
-            acc = evaluate(model, data=test_data)
+            acc = float(evaluate(model, data=test_data))
             logging.info(f"Completed {epoch } epochs. Current acc: {acc}")
 
             if writer:
